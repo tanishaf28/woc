@@ -1,0 +1,7 @@
+logs/
+eval/*.csv
+*.log
+*.zip
+*.tar
+*.bin
+*.dat
