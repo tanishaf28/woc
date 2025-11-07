@@ -12,7 +12,6 @@ const (
 const (
 	PlainMsg = iota
 	MongoDB
-	PythonScript
 )
 
 const (
@@ -60,7 +59,8 @@ var indepRatio float64 // % of independent objects
 var commonRatio float64      // % of common objects
 var clientID int
 var role int
-var conflictrate int 
+var conflictrate int
+var batchComposition string // "mixed" or "object-specific" 
 
 func loadCommandLineInputs() {
 	flag.IntVar(&numOps, "ops", 1000, "number of operations to send")
@@ -103,6 +103,7 @@ func loadCommandLineInputs() {
 	flag.StringVar(&suffix, "suffix", "xxx", "suffix of files")
 	flag.IntVar(&role,"role",0,  "0 -> server ; 1 -> client " )
 	flag.IntVar(&conflictrate,"conflictrate",20,"Conflict Rate ")
+	flag.StringVar(&batchComposition, "bcomp", "mixed", "batch composition: 'mixed' = all object types in one batch | 'object-specific' = separate batches for indep/common/hot")
 	flag.Parse()
 
 	log.Debugf("CommandLine parameters:\n - numOfServers:%v\n - myServerID:%v\n - independentRatio:%v%% - commonRatio:%v%%",

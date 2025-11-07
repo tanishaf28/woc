@@ -1,76 +1,23 @@
 #!/bin/bash
-
-# ============================================
-# WOC (Weighted Object Consensus) Cluster Launch Script
-# ============================================
-# 
-# USAGE:
-#   ./run_woc.sh                    # Start with default config
-#   
-#   # Customize via environment variables:
-#   NUM_SERVERS=7 NUM_CLIENTS=3 OPS=500 ./run_woc.sh
-#   INDEP_RATIO=80 COMMON_RATIO=20 ./run_woc.sh
-#
-# ARCHITECTURE:
-#   - Leader (Server 0): Coordinates slow path consensus for common objects
-#   - Followers (Server 1-N): Participate in both fast and slow paths
-#   - Clients: Send requests to any server (round-robin or single)
-#
-# CONSENSUS PATHS:
-#   1. FAST PATH (Independent Objects):
-#      - Leaderless, peer-to-peer consensus
-#      - Any replica can coordinate
-#      - Weighted quorum based on object state
-#      - Lower latency for independent operations
-#
-#   2. SLOW PATH (Common Objects):
-#      - Leader-based consensus (Cabinet/Raft style)
-#      - Client → Replica → Leader → Broadcast → Quorum → Commit
-#      - Coordinator forwards to leader if needed
-#      - Priority-weighted voting
-#
-# CONNECTIONS:
-#   - All servers establish full mesh connectivity (server ↔ server)
-#   - Clients connect to all servers (client → server)
-#   - Same connections used for both fast and slow paths
-#
-# STARTUP SEQUENCE:
-#   1. Leader (Server 0) starts and listens
-#   2. Followers start and listen
-#   3. All servers establish peer connections
-#   4. Clients start and connect to servers
-#   5. Clients send operations
-#
-# ============================================
-
-set -e  # Exit on error
-set -u  # Exit on undefined variable
-
-# ============================================
-# WOC Cluster Launch Script
-# ============================================
-# Starts leader (server 0), followers, and clients
-# Supports both fast path (independent objects) and slow path (common objects)
-# ============================================
-
 # Configuration
 declare -i NUM_SERVERS=5
-declare -i NUM_CLIENTS=2
+declare -i NUM_CLIENTS=3
 declare -i OPS=0       # Operations per client (set to 0 for infinite mode)
-declare -i THRESHOLD=2      # Quorum threshold (f = threshold + 1)
+declare -i THRESHOLD=1      # Quorum threshold (f = threshold + 1)
 declare -i EVAL_TYPE=0      # 0=plain msg, 1=mongodb
-declare -i BATCHSIZE=10     # Batch size (operations per RPC)
+declare -i BATCHSIZE=10000    # Batch size (operations per RPC) - LARGE batches for atomic processing
 declare -i MSG_SIZE=512     # Message size for plain msg
 declare -i MODE=0           # 0=localhost, 1=distributed
-declare -i CONFLICT_RATE=0 # Hot object conflict rate (0-100%)
-INDEP_RATIO=100.0           # 70% independent objects (fast path)
-COMMON_RATIO=0.0          # 10% common objects (slow path)
-# Note: CONFLICT_RATE + INDEP_RATIO + COMMON_RATIO should equal 100
-# Example: 20% hot + 70% independent + 10% common = 100%
+declare -i CONFLICT_RATE=0 # Hot object conflict rate (0-100%) - minimal conflicts
+INDEP_RATIO=0.0           # 98% independent objects (fast path)
+COMMON_RATIO=100.0          # 1% common objects (slow path)
+BATCH_COMPOSITION="mixed"  # "mixed" = all object types in one batch | "object-specific" = separate batches
+PIPELINE_MODE="false"      # "true" = send batches without waiting (high throughput) | "false" = sequential (ordered)
+declare -i MAX_INFLIGHT=3  # Maximum concurrent batches per client (only if PIPELINE_MODE=true)
 CONFIG_PATH="./config/cluster_localhost.conf"
 LOG_DIR="./logs"
 BINARY="./bin/woc"
-LOG_LEVEL="info"           # trace, debug, info, warn, error, fatal, panic
+LOG_LEVEL="debug"          # Temporarily "debug" to see slow path routing
 ENABLE_PRIORITY="true"     # true=cabinet mode, false=raft mode
 
 # Track PIDs
@@ -156,7 +103,7 @@ for ((i=0; i<NUM_CLIENTS; i++)); do
     mkdir -p "${LOG_DIR}/client${client_id}"
     
     echo "Starting Client ${client_id}..."
-    "$BINARY" \
+    PIPELINE_MODE="${PIPELINE_MODE}" MAX_INFLIGHT="${MAX_INFLIGHT}" "$BINARY" \
         -id=${client_id} \
         -n=${NUM_SERVERS} \
         -t=${THRESHOLD} \
@@ -169,6 +116,7 @@ for ((i=0; i<NUM_CLIENTS; i++)); do
         -indep=${INDEP_RATIO} \
         -common=${COMMON_RATIO} \
         -conflictrate=${CONFLICT_RATE} \
+        -bcomp="${BATCH_COMPOSITION}" \
         -ms=${MSG_SIZE} \
         -mode=${MODE} \
         -log="${LOG_LEVEL}" \
@@ -196,11 +144,30 @@ else
     echo "  Operations:  ${OPS} per client"
 fi
 echo "  Batch size:  ${BATCHSIZE} operations per RPC"
+echo "  Batch comp:  ${BATCH_COMPOSITION}"
+if [ "${PIPELINE_MODE}" = "true" ]; then
+    echo "  Pipeline:    ENABLED (max ${MAX_INFLIGHT} concurrent batches)"
+else
+    echo "  Pipeline:    DISABLED (sequential mode)"
+fi
 echo ""
 echo "Object Distribution:"
 echo "  Independent: ${INDEP_RATIO}% (fast path, leaderless)"
 echo "  Common:      ${COMMON_RATIO}% (slow path, leader-based)"
 echo "  Hot/Conflict:${CONFLICT_RATE}% (slow path, serialized for conflicts)"
+echo ""
+echo "Batch Composition Mode:"
+if [ "${BATCH_COMPOSITION}" == "mixed" ]; then
+    echo "  ✓ MIXED: Each batch contains diverse objects & types"
+    echo "    - Each of the ${BATCHSIZE} ops can target different objects"
+    echo "    - Hot/Independent/Common distributed per ratios above"
+    echo "    - Parallel processing on server side"
+else
+    echo "  ✓ OBJECT-SPECIFIC: Each batch targets ONE object"
+    echo "    - All ${BATCHSIZE} ops in a batch write to same object"
+    echo "    - Object type chosen per batch (Hot/Indep/Common)"
+    echo "    - Sequential processing on server side"
+fi
 echo ""
 echo "System:"
 echo "  Eval Type:   ${EVAL_TYPE} (0=plain msg, 1=mongodb)"

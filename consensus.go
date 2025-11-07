@@ -19,6 +19,7 @@ type ConsensusManager struct {
 	leaderPClock int 
 	slowPathMu sync.Mutex // Serialize slow-path consensus rounds on leader (like Cabinet)
 }
+
 func NewConsensusManager(state *smr.ServerState, pmgr *smr.PriorityManager, pstate *smr.PriorityState) *ConsensusManager {
 	return &ConsensusManager{
 		mystate:  state,
@@ -27,6 +28,13 @@ func NewConsensusManager(state *smr.ServerState, pmgr *smr.PriorityManager, psta
 		inFlight: make(map[string]Command),
 		leaderPClock: 0,
 	}
+}
+
+// GetLeaderPClock returns the current leader priority clock (thread-safe)
+func (cm *ConsensusManager) GetLeaderPClock() int {
+	cm.slowPathMu.Lock()
+	defer cm.slowPathMu.Unlock()
+	return cm.leaderPClock
 }
 type VoteRequest struct {
     Term        int
@@ -226,27 +234,7 @@ func (cm *ConsensusManager) handleSlowPath(cmd Command) (bool, string) {
         log.Infof("[SLOW] Created object %s for slow path", cmd.ObjID)
     }
     
-    // Check if already in-flight (follower receiving proposal)
-    cm.mu.Lock()
-    if last, exists := cm.inFlight[cmd.ObjID]; exists {
-        if cmd.ClientID == last.ClientID && cmd.ClientClock == last.ClientClock {
-            cm.mu.Unlock()
-            log.Debugf("[SLOW][VOTE] Server %d voting YES for ObjID=%s (already in-flight)", 
-                cm.mystate.GetMyServerID(), cmd.ObjID)
-            
-            // Follower just returns success (vote counted by leader)
-            // Don't log commit or increment counters - only leader does that
-            obj.Lock()
-            obj.LastCommitType = "SLOW"
-            obj.LastCommitTime = time.Now()
-            obj.Unlock()
-            
-            return true, "SLOW"
-        }
-    }
-    cm.mu.Unlock()
-    
-    // Forward to leader if not leader
+    // Forward to leader if not leader (BEFORE any locking)
     if !cm.mystate.IsLeader() {
         log.Infof("[SLOW] Server %d forwarding to leader %d", 
             cm.mystate.GetMyServerID(), cm.mystate.GetLeaderID())
@@ -259,18 +247,63 @@ func (cm *ConsensusManager) handleSlowPath(cmd Command) (bool, string) {
     cm.slowPathMu.Lock()
     defer cm.slowPathMu.Unlock()
     
+    // Check if already in-flight (duplicate request detection)
+    cm.mu.Lock()
+    if last, exists := cm.inFlight[cmd.ObjID]; exists {
+        if cmd.ClientID == last.ClientID && cmd.ClientClock == last.ClientClock {
+            cm.mu.Unlock()
+            log.Debugf("[SLOW][DUP] Leader received duplicate request for ObjID=%s", cmd.ObjID)
+            
+            obj.Lock()
+            obj.LastCommitType = "SLOW"
+            obj.LastCommitTime = time.Now()
+            obj.Unlock()
+            
+            return true, "SLOW"
+        }
+    }
+    cm.mu.Unlock()
+    
     log.Debugf("[SLOW][LEADER] Acquired slow-path lock for ObjID=%s | ClientClock=%d", cmd.ObjID, cmd.ClientClock)
     
-    // Get clock and increment (now safe because slowPathMu serializes access)
+    // Get current clock (don't increment yet)
     leaderPClock := cm.leaderPClock
-    cm.leaderPClock++
     
-    // Get priorities for current clock (should exist immediately after serialized increment)
+    // CRITICAL: Ensure priorities exist for this clock before proceeding
     fpriorities := cm.pmgr.GetFollowerPriorities(leaderPClock)
     if len(fpriorities) == 0 {
-        log.Errorf("[SLOW] No priorities for pClock=%d after serialized access! This shouldn't happen.", leaderPClock)
-        return false, "SLOW"
+        // Priorities don't exist - this means initialization issue or we need to create them
+        log.Warnf("[SLOW] No priorities for pClock=%d, initializing from previous clock", leaderPClock)
+        
+        // Try to get priorities from previous clock
+        if leaderPClock > 0 {
+            prevPriorities := cm.pmgr.GetFollowerPriorities(leaderPClock - 1)
+            if len(prevPriorities) > 0 {
+                // Copy previous priorities to current clock as fallback
+                prioQueue := make(chan int, cm.pmgr.GetNumServers())
+                for id := range prevPriorities {
+                    if id != cm.mystate.GetMyServerID() {
+                        prioQueue <- id
+                    }
+                }
+                if err := cm.pmgr.UpdateFollowerPriorities(leaderPClock, prioQueue, cm.mystate.GetMyServerID()); err != nil {
+                    log.Errorf("[SLOW] Failed to initialize priorities for pClock=%d: %v", leaderPClock, err)
+                    return false, "SLOW"
+                }
+                fpriorities = cm.pmgr.GetFollowerPriorities(leaderPClock)
+                log.Infof("[SLOW] Initialized priorities for pClock=%d from previous clock", leaderPClock)
+            } else {
+                log.Errorf("[SLOW] No priorities available for pClock=%d or previous clock!", leaderPClock)
+                return false, "SLOW"
+            }
+        } else {
+            log.Errorf("[SLOW] No priorities for pClock=0 - initialization failed!")
+            return false, "SLOW"
+        }
     }
+    
+    // Now increment for next round
+    cm.leaderPClock++
     
     log.Infof("[SLOW] Assigned pClock=%d to ObjID=%s | ClientClock=%d", leaderPClock, cmd.ObjID, cmd.ClientClock)
     
@@ -441,7 +474,9 @@ func (cm *ConsensusManager) forwardToLeader(cmd Command) (bool, string) {
 			return cm.handleSlowPath(cmd)
 		}
 	}
-	args := cm.prepareArgs(cmd, cm.pstate.NextClock())
+	// IMPORTANT: Use PrioClock=0 when forwarding to leader
+	// Leader will assign the proper PrioClock when broadcasting
+	args := cm.prepareArgs(cmd, 0)
 	reply := &Reply{}
 	if err := leaderConn.txClient.Call("WocService.ConsensusService", args, &reply); err != nil {
 		log.Errorf("forward to leader failed: %v", err)
@@ -566,8 +601,14 @@ func executeSlowRPC(conn *ServerDock, service string, args *Args, receiver chan 
 
 	// Execute RPC with retries
 	start := time.Now()
+	log.Debugf("[SLOW-RPC] Calling server=%d | PrioClock=%d | ObjID=%s | ClientClock=%d", 
+		conn.serverID, args.PrioClock, args.ObjID, args.ClientClock)
+	
 	err := conn.txClient.Call(service, args, &reply)
 	latency := time.Since(start).Seconds() * 1000 // milliseconds
+	
+	log.Debugf("[SLOW-RPC] Response from server=%d | latency=%.2fms | err=%v | Accepted=%v", 
+		conn.serverID, latency, err, reply.Accepted)
 	
 	if err != nil {
 		log.Errorf("[SLOW] RPC call error | server=%d | ClientClock=%d | PrioClock=%d | err=%v", 
@@ -577,6 +618,15 @@ func executeSlowRPC(conn *ServerDock, service string, args *Args, receiver chan 
 		conn.jobQMu.Lock()
 		conn.jobQ[args.PrioClock] <- struct{}{}
 		conn.jobQMu.Unlock()
+		
+		// CRITICAL: Must send error response to receiver so leader doesn't wait forever!
+		rinfo := ReplyInfo{
+			ServerID:    conn.serverID,
+			Reply:       Reply{Accepted: false, ErrorMsg: err},
+			Latency:     latency,
+			ClientClock: args.ClientClock,
+		}
+		receiver <- rinfo
 		return
 	}
 
@@ -589,6 +639,15 @@ func executeSlowRPC(conn *ServerDock, service string, args *Args, receiver chan 
 		conn.jobQMu.Lock()
 		conn.jobQ[args.PrioClock] <- struct{}{}
 		conn.jobQMu.Unlock()
+		
+		// CRITICAL: Send rejection response to receiver
+		rinfo := ReplyInfo{
+			ServerID:    conn.serverID,
+			Reply:       reply,
+			Latency:     latency,
+			ClientClock: args.ClientClock,
+		}
+		receiver <- rinfo
 		return
 	}
 
