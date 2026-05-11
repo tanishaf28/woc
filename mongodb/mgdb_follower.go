@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +18,36 @@ import (
 var log = logrus.New()
 
 const DataPath string = "./ycsb/workData/"
+
+// classifyKey partitions the YCSB keyspace by clientID to determine object type.
+// Independent keys are owned by a single client (fast path, leaderless).
+// Dependent keys are shared across clients (slow path, leader-coordinated).
+func classifyKey(key string, clientID int, numClients int) int {
+	// YCSB keys are "user" + zero-padded number
+	if key == "" {
+		return 1 // CommonObject for scan/findAll
+	}
+
+	// Extract numeric suffix from "user12345" format
+	var keyNum int
+	_, err := fmt.Sscanf(strings.TrimPrefix(key, "user"), "%d", &keyNum)
+	if err != nil {
+		return 1 // CommonObject if parse fails
+	}
+
+	// Partition keyspace by clientID (YCSB default ~1M records total)
+	sliceSize := 1000000 / numClients
+	clientSliceStart := clientID * sliceSize
+	clientSliceEnd := clientSliceStart + sliceSize
+
+	// Keys in this client's slice → Independent (single writer guaranteed)
+	if keyNum >= clientSliceStart && keyNum < clientSliceEnd {
+		return 0 // IndependentObject
+	}
+
+	// Keys outside this client's slice → Dependent (multiple writers possible)
+	return 1 // CommonObject
+}
 
 type MongoFollower struct {
 	clientThreadNum int
@@ -118,7 +149,7 @@ func (fl *MongoFollower) ClearTable(table string) (err error) {
 	_, _, err = fl.FollowerAPI([]Query{dropTable})
 
 	if err != nil {
-		log.Errorf("clear table failed | err: %v")
+		log.Errorf("clear table failed | err: %v", err)
 		return
 	}
 	log.Debugf("table cleared: %s", table)
@@ -165,7 +196,7 @@ func (fl *MongoFollower) PrintTable(table string) (err error) {
 func (fl *MongoFollower) CleanUp() (err error) {
 	err = fl.ClearTable("usertable")
 	if err != nil {
-		log.Errorf("clean up table failed | err: %v", err)
+		log.Errorf("clear table failed | err: %v", err)
 		return
 	}
 

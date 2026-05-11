@@ -16,7 +16,7 @@ import (
 
 func main() {
 
-	filePath := "../testData/workData/"
+	filePath := "./ycsb/workData/"
 	fileName := ""
 	clientThreadNum, queryThreadNum := 1, 1
 	runTime := true
@@ -34,9 +34,25 @@ func main() {
 		} else {
 			switch param {
 			case "load":
-				fileName = "load_workloada.dat"
+				workload := "a"
+				if len(os.Args) > 2 {
+					workload = os.Args[2]
+				}
+				if !validWorkloads[workload] {
+					fmt.Fprintf(os.Stderr, "Invalid workload: %s. Valid workloads: a-f\n", workload)
+					os.Exit(1)
+				}
+				fileName = fmt.Sprintf("load_workload%s.dat", workload)
 			case "run":
-				fileName = "run_workloada.dat"
+				workload := "a"
+				if len(os.Args) > 2 {
+					workload = os.Args[2]
+				}
+				if !validWorkloads[workload] {
+					fmt.Fprintf(os.Stderr, "Invalid workload: %s. Valid workloads: a-f\n", workload)
+					os.Exit(1)
+				}
+				fileName = fmt.Sprintf("run_workload%s.dat", workload)
 			case "clear":
 				if err := mgFollower.ClearTable("usertable"); err != nil {
 					log.Fatal(err)

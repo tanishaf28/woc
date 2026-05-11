@@ -7,6 +7,15 @@ import (
 	"strings"
 )
 
+var validWorkloads = map[string]bool{
+	"a": true, // 50R/50W Zipfian — best for CORA (mixed fast/slow path)
+	"b": true, // 95R/5W — mostly reads, fast path dominates
+	"c": true, // 95R/5W — mostly reads
+	"d": true, // 95R/5W — latest distribution
+	"e": true, // 95R/5W — short ranges
+	"f": true, // 50R/50RMW — read-modify-write, exercises slow path
+}
+
 type Query struct {
 	Op     int
 	Table  string

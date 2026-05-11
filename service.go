@@ -277,44 +277,101 @@ func conJobPlainMsg(args *Args, reply *Reply) error {
 
 func conJobMongoDB(args *Args, reply *Reply) error {
 	start := time.Now()
+	isLeader := cm.mystate.IsLeader()
 
-	if args.PrioClock > 0 && !cm.mystate.IsLeader() {
-		defer func() {
-			if obj := cm.mystate.GetObject(args.ObjID); obj != nil {
-				obj.Lock()
-				obj.Value = nil
-				obj.Unlock()
-			}
-		}()
+	if args.PrioVal > 0 {
+		if latencyDebug {
+			log.Debugf("[LATENCY] Follower voting (MongoDB immediate response) | ClientClock=%d | PrioClock=%d | ObjID=%s",
+				args.ClientClock, args.PrioClock, args.ObjID)
+		}
 		
-		cmd := Command{
-			ClientID:    args.ClientID,
-			ClientClock: args.ClientClock,
-			ObjID:       args.ObjID,
-			ObjType:     args.ObjType,
-			CmdType:     args.CmdType,
-			Payload:     args.CmdMongo,
-		}
-		ok, path := cm.HandleCommand(cmd)
-		reply.PathUsed = path
+		reply.PathUsed = "SLOW"
 		reply.LeaderClock = args.PrioClock
-		reply.Success = ok
-		reply.Accepted = ok
-
-		if ok {
-			_, queryLatency, err := mongoDbFollower.FollowerAPI(args.CmdMongo)
-			if err != nil {
-				log.Errorf("MongoDB execution failed | err: %v | latency: %v", err, queryLatency)
-				reply.ErrorMsg = err
-				return err
-			}
-		}
-
+		reply.Success = true
+		reply.Accepted = true
 		reply.ExeResult = time.Since(start).String()
+		
 		return nil
 	}
-	
-	return errors.New("MongoDB leader processing not implemented")
+
+	if !isLeader {
+		if latencyDebug {
+			log.Debugf("[LATENCY] Follower MongoDB handling request | ClientClock=%d | ObjType=%d",
+				args.ClientClock, args.ObjType)
+		}
+
+		if args.ObjType == IndependentObject {
+			cmd := Command{
+				ClientID:    args.ClientID,
+				ClientClock: args.ClientClock,
+				ObjID:       args.ObjID,
+				ObjType:     args.ObjType,
+				CmdType:     args.CmdType,
+				Payload:     args.CmdMongo,
+				ForwardedBy: -1,
+			}
+			
+			ok, pathUsed := cm.HandleCommand(cmd)
+			
+			reply.Success = ok
+			reply.PathUsed = pathUsed
+			reply.Accepted = ok
+			reply.LeaderClock = 0
+			reply.ExeResult = time.Since(start).String()
+			
+			if ok {
+				_, queryLatency, err := mongoDbFollower.FollowerAPI(args.CmdMongo)
+				if err != nil {
+					log.Errorf("MongoDB follower execution failed | err: %v", err)
+					reply.ErrorMsg = err
+					return err
+				}
+				reply.Latency = float64(queryLatency.Milliseconds())
+			}
+			
+			if !ok {
+				reply.ErrorMsg = fmt.Errorf("fast path MongoDB consensus failed")
+			}
+			return reply.ErrorMsg
+		}
+		
+		reply.ExeResult = time.Since(start).String()
+		return fmt.Errorf("MongoDB Dependent forwarding not yet implemented")
+	}
+
+	cmd := Command{
+		ClientID:    args.ClientID,
+		ClientClock: args.ClientClock,
+		ObjID:       args.ObjID,
+		ObjType:     args.ObjType,
+		CmdType:     args.CmdType,
+		Payload:     args.CmdMongo,
+		ForwardedBy: args.ForwardedBy,
+	}
+
+	ok, path := cm.HandleCommand(cmd)
+	reply.PathUsed = path
+	reply.Success = ok
+	reply.Accepted = ok
+
+	if ok {
+		_, queryLatency, err := mongoDbFollower.FollowerAPI(args.CmdMongo)
+		if err != nil {
+			log.Errorf("MongoDB leader execution failed | err: %v", err)
+			reply.ErrorMsg = err
+			reply.ExeResult = time.Since(start).String()
+			return err
+		}
+		reply.Latency = float64(queryLatency.Milliseconds())
+	}
+
+	reply.ExeResult = fmt.Sprintf("Total:%vms", time.Since(start).Milliseconds())
+
+	if !ok {
+		reply.ErrorMsg = fmt.Errorf("%s path MongoDB consensus failed", path)
+	}
+
+	return reply.ErrorMsg
 }
 
 func (s *WocService) RequestVote(args *VoteArgs, reply *Reply) error {

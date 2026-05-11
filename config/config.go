@@ -35,7 +35,11 @@ func ParseClusterConfig(numOfServers int, path string) (info [][]string) {
 	scanner.Split(bufio.ScanLines)
 
 	for scanner.Scan() {
-		fileRows = append(fileRows, scanner.Text())
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fileRows = append(fileRows, line)
 	}
 
 	if len(fileRows) < numOfServers {
@@ -44,7 +48,7 @@ func ParseClusterConfig(numOfServers int, path string) (info [][]string) {
 	}
 
 	for i := 0; i < len(fileRows); i++ {
-		row := strings.Split(fileRows[i], " ")
+		row := strings.Fields(fileRows[i])
 		info = append(info, row)
 	}
 
@@ -72,7 +76,11 @@ func ParseThresholds(path string) (possibleTs chan int) {
 	scanner.Split(bufio.ScanLines)
 
 	for scanner.Scan() {
-		fileRows = append(fileRows, scanner.Text())
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fileRows = append(fileRows, line)
 	}
 
 	if len(fileRows) > 1 {
@@ -80,7 +88,7 @@ func ParseThresholds(path string) (possibleTs chan int) {
 		panic(errors.New(err))
 	}
 
-	row := strings.Split(fileRows[0], " ")
+	row := strings.Fields(fileRows[0])
 
 	for _, s := range row {
 		v, err := strconv.Atoi(s)

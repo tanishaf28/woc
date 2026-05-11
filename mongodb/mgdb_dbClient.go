@@ -57,7 +57,7 @@ func dbRead(db *mongo.Database, table string, key string,
 	coll := db.Collection(table)
 	filter := bson.D{}
 	if key == "" {
-		log.Errorf("Find all in table", coll.Name())
+		log.Debugf("Find all in table: %s", coll.Name())
 	} else {
 		filter = bson.D{{"_id", key}}
 	}
