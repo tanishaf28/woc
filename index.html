@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CFT Consensus Evaluation — Lab Plots</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Syne:wght@400;700;800&display=swap');
+
+  :root {
+    --bg: #0a0c0f;
+    --surface: #111418;
+    --border: #1e2530;
+    --cora:    #00e5ff;
+    --epaxos:  #ff6b35;
+    --cabinet: #7cfc00;
+    --raft:    #bf5af2;
+    --muted:   #4a5568;
+    --text:    #e2e8f0;
+    --subtext: #718096;
+    --accent:  #00e5ff;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    min-height: 100vh;
+  }
+
+  header {
+    padding: 40px 48px 24px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: flex-end;
+    gap: 24px;
+  }
+  header h1 {
+    font-family: 'Syne', sans-serif;
+    font-size: 28px;
+    font-weight: 800;
+    letter-spacing: -0.5px;
+    color: #fff;
+  }
+  header h1 span { color: var(--accent); }
+  header p { color: var(--subtext); font-size: 11px; margin-top: 4px; }
+
+  .legend-bar {
+    display: flex; gap: 24px; padding: 14px 48px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .legend-item { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--subtext); }
+  .legend-dot { width: 10px; height: 10px; border-radius: 50%; }
+
+  nav {
+    display: flex; gap: 0; padding: 0 48px;
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+    background: var(--surface);
+  }
+  nav button {
+    background: none; border: none; color: var(--subtext);
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    padding: 12px 18px; cursor: pointer;
+    border-bottom: 2px solid transparent;
+    white-space: nowrap; transition: all 0.2s;
+  }
+  nav button:hover { color: var(--text); }
+  nav button.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  main { padding: 32px 48px; }
+
+  .section { display: none; }
+  .section.active { display: block; }
+
+  .section-title {
+    font-family: 'Syne', sans-serif; font-weight: 700;
+    font-size: 18px; color: #fff; margin-bottom: 6px;
+  }
+  .section-sub { color: var(--subtext); font-size: 11px; margin-bottom: 28px; }
+
+  .charts-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(520px, 1fr));
+    gap: 24px;
+  }
+
+  .chart-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 20px 24px 16px;
+  }
+  .chart-label {
+    font-size: 10px; color: var(--subtext); letter-spacing: 1px;
+    text-transform: uppercase; margin-bottom: 4px;
+  }
+  .chart-title {
+    font-family: 'Syne', sans-serif; font-size: 14px; font-weight: 700;
+    color: var(--text); margin-bottom: 16px;
+  }
+  .chart-wrap { position: relative; height: 280px; }
+
+  .scatter-wrap { position: relative; height: 340px; }
+
+  .note {
+    font-size: 10px; color: var(--muted); margin-top: 10px;
+    padding-top: 10px; border-top: 1px solid var(--border);
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>CFT Consensus <span>Evaluation</span></h1>
+    <p>Lab plots — Cora · EPaxos · Cabinet · Raft &nbsp;|&nbsp; 5-node heterogeneous cluster</p>
+  </div>
+</header>
+
+<div class="legend-bar">
+  <div class="legend-item"><div class="legend-dot" style="background:var(--cora)"></div>Cora</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--epaxos)"></div>EPaxos</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--cabinet)"></div>Cabinet</div>
+  <div class="legend-item"><div class="legend-dot" style="background:var(--raft)"></div>Raft</div>
+</div>
+
+<nav>
+  <button class="active" onclick="show('ratio')">Indep/Common Ratio</button>
+  <button onclick="show('inflight')">Max Inflight</button>
+  <button onclick="show('failures')">Failures</button>
+  <button onclick="show('delays')">Delays (basic)</button>
+  <button onclick="show('batching')">Batching</button>
+  <button onclick="show('msgsize')">Msg Size</button>
+  <button onclick="show('crash')">Crash Scenarios</button>
+  <button onclick="show('netem')">NetEm Delays (D1/D4)</button>
+</nav>
+
+<main>
+
+<!-- ============================================================ -->
+<!-- SECTION: Ratio -->
+<!-- ============================================================ -->
+<div class="section active" id="sec-ratio">
+  <div class="section-title">Independent / Common Ratio Sweep</div>
+  <div class="section-sub">Throughput and latency as workload shifts from independent (fast-path) to common (slow-path) operations</div>
+  <div class="charts-grid">
+
+    <div class="chart-card">
+      <div class="chart-label">G1</div>
+      <div class="chart-title">Ratio → Throughput (ops/s)</div>
+      <div class="chart-wrap"><canvas id="g1"></canvas></div>
+    </div>
+
+    <div class="chart-card">
+      <div class="chart-label">G2</div>
+      <div class="chart-title">Ratio → Latency (ms)</div>
+      <div class="chart-wrap"><canvas id="g2"></canvas></div>
+    </div>
+
+    <div class="chart-card" style="grid-column: 1/-1">
+      <div class="chart-label">G3</div>
+      <div class="chart-title">Throughput vs Latency  (scatter — each point = one ratio setting)</div>
+      <div class="scatter-wrap"><canvas id="g3"></canvas></div>
+      <div class="note">Arrow direction: left=100/0, right=0/100. Low-left is ideal.</div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SECTION: Inflight -->
+<!-- ============================================================ -->
+<div class="section" id="sec-inflight">
+  <div class="section-title">Max Inflight Sweep</div>
+  <div class="section-sub">Pipeline depth vs throughput and latency — finds the sweet spot before latency degrades</div>
+  <div class="charts-grid">
+
+    <div class="chart-card">
+      <div class="chart-label">G4</div>
+      <div class="chart-title">Max Inflight → Throughput (ops/s)</div>
+      <div class="chart-wrap"><canvas id="g4"></canvas></div>
+    </div>
+
+    <div class="chart-card">
+      <div class="chart-label">G5</div>
+      <div class="chart-title">Max Inflight → Latency (ms)</div>
+      <div class="chart-wrap"><canvas id="g5"></canvas></div>
+    </div>
+
+    <div class="chart-card" style="grid-column: 1/-1">
+      <div class="chart-label">G6</div>
+      <div class="chart-title">Throughput vs Latency  (scatter — each point = one inflight value)</div>
+      <div class="scatter-wrap"><canvas id="g6"></canvas></div>
+      <div class="note">Numbers label each data point. Sweet spot = top-left region (high throughput, low latency).</div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SECTION: Failures -->
+<!-- ============================================================ -->
+<div class="section" id="sec-failures">
+  <div class="section-title">Fault Tolerance — Static Failures</div>
+  <div class="section-sub">Throughput and latency under different node failure scenarios (killed at t=0)</div>
+  <div class="charts-grid">
+
+    <div class="chart-card">
+      <div class="chart-label">G7</div>
+      <div class="chart-title">Failure Scenario → Throughput (ops/s)</div>
+      <div class="chart-wrap"><canvas id="g7"></canvas></div>
+    </div>
+
+    <div class="chart-card">
+      <div class="chart-label">G8</div>
+      <div class="chart-title">Failure Scenario → Latency (ms)</div>
+      <div class="chart-wrap"><canvas id="g8"></canvas></div>
+    </div>
+
+    <div class="chart-card" style="grid-column: 1/-1">
+      <div class="chart-label">G9</div>
+      <div class="chart-title">Throughput vs Latency per Failure Scenario</div>
+      <div class="scatter-wrap"><canvas id="g9"></canvas></div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SECTION: Basic delays -->
+<!-- ============================================================ -->
+<div class="section" id="sec-delays">
+  <div class="section-title">Basic Delay Sweep (Cora only)</div>
+  <div class="section-sub">Uniform delay 0–50ms — shows impact of modest latency on throughput</div>
+  <div class="charts-grid">
+
+    <div class="chart-card">
+      <div class="chart-label">G10</div>
+      <div class="chart-title">Delay (ms) → Throughput (ops/s)</div>
+      <div class="chart-wrap"><canvas id="g10"></canvas></div>
+    </div>
+
+    <div class="chart-card">
+      <div class="chart-label">G11</div>
+      <div class="chart-title">Delay (ms) → Latency (ms)</div>
+      <div class="chart-wrap"><canvas id="g11"></canvas></div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SECTION: Batching -->
+<!-- ============================================================ -->
+<div class="section" id="sec-batching">
+  <div class="section-title">Batch Size Sweep</div>
+  <div class="section-sub">Higher batch sizes increase throughput at cost of latency — P99 shows tail behaviour</div>
+  <div class="charts-grid">
+
+    <div class="chart-card">
+      <div class="chart-label">G12</div>
+      <div class="chart-title">Batch Size → Throughput (ops/s)</div>
+      <div class="chart-wrap"><canvas id="g12"></canvas></div>
+    </div>
+
+    <div class="chart-card">
+      <div class="chart-label">G13</div>
+      <div class="chart-title">Batch Size → Latency (ms) + P99</div>
+      <div class="chart-wrap"><canvas id="g13"></canvas></div>
+    </div>
+
+    <div class="chart-card" style="grid-column: 1/-1">
+      <div class="chart-label">G14</div>
+      <div class="chart-title">Throughput vs Latency (Cora + EPaxos, batch sweep)</div>
+      <div class="scatter-wrap"><canvas id="g14"></canvas></div>
+      <div class="note">Each point = one batch size. Labels show batch size value.</div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SECTION: Msg size -->
+<!-- ============================================================ -->
+<div class="section" id="sec-msgsize">
+  <div class="section-title">Message Size Sweep</div>
+  <div class="section-sub">64B → 4KB payload size — both protocols show minimal sensitivity</div>
+  <div class="charts-grid">
+
+    <div class="chart-card">
+      <div class="chart-label">G15</div>
+      <div class="chart-title">Msg Size (bytes) → Throughput (ops/s)</div>
+      <div class="chart-wrap"><canvas id="g15"></canvas></div>
+    </div>
+
+    <div class="chart-card">
+      <div class="chart-label">G16</div>
+      <div class="chart-title">Msg Size (bytes) → Latency (ms)</div>
+      <div class="chart-wrap"><canvas id="g16"></canvas></div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SECTION: Crash -->
+<!-- ============================================================ -->
+<div class="section" id="sec-crash">
+  <div class="section-title">Crash Fault Injection (t=10s)</div>
+  <div class="section-sub">Node killed at t=10s — measures throughput/latency over post-crash observation window</div>
+  <div class="charts-grid">
+
+    <div class="chart-card">
+      <div class="chart-label">G17</div>
+      <div class="chart-title">Crash Scenario → Throughput (ops/s)</div>
+      <div class="chart-wrap"><canvas id="g17"></canvas></div>
+    </div>
+
+    <div class="chart-card">
+      <div class="chart-label">G18</div>
+      <div class="chart-title">Crash Scenario → Latency (ms)</div>
+      <div class="chart-wrap"><canvas id="g18"></canvas></div>
+    </div>
+
+    <div class="chart-card" style="grid-column: 1/-1">
+      <div class="chart-label">G19</div>
+      <div class="chart-title">Throughput vs Latency per Crash Scenario</div>
+      <div class="scatter-wrap"><canvas id="g19"></canvas></div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- SECTION: NetEm delays -->
+<!-- ============================================================ -->
+<div class="section" id="sec-netem">
+  <div class="section-title">NetEm Delay Scenarios (D1 + D4)</div>
+  <div class="section-sub">D1: uniform delay sweep 0→20ms · D4: burst delay scenario</div>
+  <div class="charts-grid">
+
+    <div class="chart-card">
+      <div class="chart-label">G20</div>
+      <div class="chart-title">D1 Delay (ms) → Throughput (ops/s)</div>
+      <div class="chart-wrap"><canvas id="g20"></canvas></div>
+    </div>
+
+    <div class="chart-card">
+      <div class="chart-label">G21</div>
+      <div class="chart-title">D1 Delay (ms) → Latency (ms)</div>
+      <div class="chart-wrap"><canvas id="g21"></canvas></div>
+    </div>
+
+    <div class="chart-card" style="grid-column: 1/-1">
+      <div class="chart-label">G22</div>
+      <div class="chart-title">D1 Throughput vs Latency + D4 reference point</div>
+      <div class="scatter-wrap"><canvas id="g22"></canvas></div>
+      <div class="note">D4 (burst 1000ms spikes) shown as ★ reference. D1 points labelled by delay value.</div>
+    </div>
+
+  </div>
+</div>
+
+</main>
+
+<script>
+// ================================================================
+// DATA
+// ================================================================
+const RATIO_LABELS = ['100/0','90/10','80/20','60/40','40/60','20/80','10/90','0/100'];
+const RATIO_CORA_TP  = [11244.3,9768.2,8540.4,5236.6,3575.2,2587.1,2403.0,2137.4];
+const RATIO_CORA_LAT = [0.868,1.002,1.147,1.887,2.773,3.835,4.134,4.674];
+const RATIO_EPA_TP   = [5892.3,5622.4,5676,4853,4231,3712,3427,3403.9];
+const RATIO_EPA_LAT  = [1.675,1.765,1.717,2.037,2.341,2.669,2.896,2.913];
+const RATIO_CAB_TP   = [596.3,null,null,null,null,null,null,null];
+const RATIO_CAB_LAT  = [3.206,null,null,null,null,null,null,null];
+
+const INF_LABELS = [1,2,3,4,5,8,10,15,20,25,30,35,40,45,50];
+const INF_CORA_TP  = [730.6,2228.2,4724.0,7936.8,10018.6,15383.8,18185.6,19258.4,20189.1,19577.3,19547.1,20107.6,19405.7,20742.9,20610];
+const INF_CORA_LAT = [2.672,1.770,1.249,0.987,0.976,1.013,1.072,1.508,1.951,2.522,3.035,3.451,4.092,4.306,4.819];
+const INF_EPA_TP   = [587.4,1794.3,3257.4,4601.4,5351.5,7068.1,7715.9,8501.8,8375,8704,8890.9,8226.8,8375.4,9029.4,9215.3];
+const INF_EPA_LAT  = [3.348,2.209,1.825,1.718,1.846,2.238,2.567,3.501,4.746,5.719,6.717,8.456,9.525,9.940,10.819];
+
+const FAIL_LABELS = ['No fail','Node0','Node1','Node4','Node0+1'];
+const FAIL_CORA_TP  = [9869.9,8046.1,10437.7,10471.3,7816.1];
+const FAIL_CORA_LAT = [0.955,1.029,0.830,0.840,1.054];
+const FAIL_EPA_TP   = [5511.3,5725.9,5317.2,5767.8,5654.9];
+const FAIL_EPA_LAT  = [1.792,1.699,1.831,1.682,1.694];
+
+const DELAY_LABELS = [0,5,10,20,50,75,100];
+const DELAY_CORA_TP  = [9971.6,9783.1,9582.6,9743.5,9820.2,9359.1,9361.2];
+const DELAY_CORA_LAT = [0.979,0.962,0.966,0.968,0.952,1.008,0.998];
+
+const BATCH_LABELS = [1,10,50,100,500,1000,2000];
+const BATCH_CORA_TP  = [9893.6,77378,260330.4,378085.2,477745.3,518274.3,578502];
+const BATCH_CORA_LAT = [0.987,1.206,1.655,2.090,6.163,10.554,17.961];
+const BATCH_CORA_P99 = [2.4,3.0,4.0,5.6,37.9,63,86.1];
+const BATCH_EPA_TP   = [5386.1,43639.7,125831.7,179306.8,265760.4,314653.3,314462.2];
+const BATCH_EPA_LAT  = [1.835,2.213,3.704,5.191,16.725,27.601,56.305];
+
+const MSG_LABELS = [64,512,1024,2048,4096];
+const MSG_CORA_TP  = [9606,9859.6,9639.0,9971,10019.1];
+const MSG_CORA_LAT = [1.017,0.990,1.012,0.979,0.974];
+const MSG_EPA_TP   = [5382,5436,5323.6,5357.5,5474.3];
+const MSG_EPA_LAT  = [1.836,1.818,1.850,1.846,1.805];
+
+const CRASH_LABELS = ['No fail','Leader','Follower1','Node4','f-of-n1'];
+const CRASH_CORA_TP  = [9108,8530.5,10414,10895.3,6368.5];
+const CRASH_CORA_LAT = [1.073,1.132,0.935,0.893,1.549];
+const CRASH_EPA_TP   = [4296.7,4244.94,4051.0,4436.8,40404.7];
+const CRASH_EPA_LAT  = [2.391,2.309,2.421,2.207,2.428];
+
+const NETEM_LABELS = [0,5,10,20];
+const NETEM_CORA_TP  = [15445.5,1676.9,1249.6,1097.9];
+const NETEM_CORA_LAT = [1.264,11.865,15.898,18.023];
+const NETEM_EPA_TP   = [5314.8,925.4,1025.0,1445];
+const NETEM_EPA_LAT  = [1.861,85.28,114.968,32.496];
+const D4_TP  = 9006.7;
+const D4_LAT = 1.421;
+
+// ================================================================
+// CHART DEFAULTS
+// ================================================================
+Chart.defaults.color = '#718096';
+Chart.defaults.borderColor = '#1e2530';
+Chart.defaults.font.family = "'JetBrains Mono', monospace";
+Chart.defaults.font.size = 11;
+
+const C = { cora: '#00e5ff', epaxos: '#ff6b35', cabinet: '#7cfc00', raft: '#bf5af2' };
+
+function lineDS(label, data, color, dash=[]) {
+  return {
+    label, data,
+    borderColor: color, backgroundColor: color+'22',
+    pointBackgroundColor: color, pointRadius: 4, pointHoverRadius: 6,
+    borderWidth: 2, borderDash: dash, tension: 0.3, fill: false
+  };
+}
+
+function barDS(label, data, color) {
+  return {
+    label, data,
+    backgroundColor: color+'99', borderColor: color,
+    borderWidth: 1, borderRadius: 2
+  };
+}
+
+function scatterDS(label, xs, ys, color, pointStyle='circle') {
+  return {
+    label,
+    data: xs.map((x,i) => ({x, y: ys[i]})),
+    backgroundColor: color+'cc', borderColor: color,
+    pointRadius: 7, pointHoverRadius: 9,
+    pointStyle, showLine: true,
+    borderWidth: 1.5, tension: 0.3
+  };
+}
+
+const axTp = { title: { display:true, text:'Throughput (ops/s)', color:'#718096' }, grid: { color:'#1e2530' } };
+const axLat = { title: { display:true, text:'Latency (ms)', color:'#718096' }, grid: { color:'#1e2530' } };
+const axX = (label) => ({ title: { display:true, text:label, color:'#718096' }, grid: { color:'#1e2530' } });
+
+function mkLine(id, labels, datasets, xLabel, yLabel) {
+  new Chart(id, { type:'line', data:{labels, datasets}, options:{
+    responsive:true, maintainAspectRatio:false,
+    plugins:{ legend:{ labels:{ color:'#a0aec0', boxWidth:12 } } },
+    scales:{ x: axX(xLabel), y: yLabel === 'lat' ? axLat : axTp }
+  }});
+}
+
+function mkBar(id, labels, datasets, xLabel, yLabel) {
+  new Chart(id, { type:'bar', data:{labels, datasets}, options:{
+    responsive:true, maintainAspectRatio:false,
+    plugins:{ legend:{ labels:{ color:'#a0aec0', boxWidth:12 } } },
+    scales:{ x: axX(xLabel), y: yLabel === 'lat' ? axLat : axTp }
+  }});
+}
+
+function mkScatter(id, datasets, xLabel='Throughput (ops/s)', yLabel='Latency (ms)', extraPlugins={}) {
+  new Chart(id, { type:'scatter', data:{datasets}, options:{
+    responsive:true, maintainAspectRatio:false,
+    plugins:{ legend:{ labels:{ color:'#a0aec0', boxWidth:12 } }, ...extraPlugins },
+    scales:{
+      x:{ title:{ display:true, text:xLabel, color:'#718096' }, grid:{ color:'#1e2530' } },
+      y:{ title:{ display:true, text:yLabel, color:'#718096' }, grid:{ color:'#1e2530' } }
+    }
+  }});
+}
+
+// ================================================================
+// BUILD ALL CHARTS
+// ================================================================
+
+// --- RATIO ---
+mkLine('g1', RATIO_LABELS,
+  [lineDS('Cora', RATIO_CORA_TP, C.cora),
+   lineDS('EPaxos', RATIO_EPA_TP, C.epaxos),
+   lineDS('Cabinet (100/0)', [596.3,...new Array(7).fill(null)], C.cabinet, [6,3])],
+  'Indep/Common ratio', 'tp');
+
+mkLine('g2', RATIO_LABELS,
+  [lineDS('Cora', RATIO_CORA_LAT, C.cora),
+   lineDS('EPaxos', RATIO_EPA_LAT, C.epaxos),
+   lineDS('Cabinet (100/0)', [3.206,...new Array(7).fill(null)], C.cabinet, [6,3])],
+  'Indep/Common ratio', 'lat');
+
+mkScatter('g3',
+  [scatterDS('Cora', RATIO_CORA_TP, RATIO_CORA_LAT, C.cora),
+   scatterDS('EPaxos', RATIO_EPA_TP, RATIO_EPA_LAT, C.epaxos)]);
+
+// --- INFLIGHT ---
+mkLine('g4', INF_LABELS,
+  [lineDS('Cora', INF_CORA_TP, C.cora),
+   lineDS('EPaxos', INF_EPA_TP, C.epaxos)],
+  'Max Inflight', 'tp');
+
+mkLine('g5', INF_LABELS,
+  [lineDS('Cora', INF_CORA_LAT, C.cora),
+   lineDS('EPaxos', INF_EPA_LAT, C.epaxos)],
+  'Max Inflight', 'lat');
+
+mkScatter('g6',
+  [scatterDS('Cora', INF_CORA_TP, INF_CORA_LAT, C.cora),
+   scatterDS('EPaxos', INF_EPA_TP, INF_EPA_LAT, C.epaxos)]);
+
+// --- FAILURES ---
+mkBar('g7', FAIL_LABELS,
+  [barDS('Cora', FAIL_CORA_TP, C.cora),
+   barDS('EPaxos', FAIL_EPA_TP, C.epaxos)],
+  'Failure scenario', 'tp');
+
+mkBar('g8', FAIL_LABELS,
+  [barDS('Cora', FAIL_CORA_LAT, C.cora),
+   barDS('EPaxos', FAIL_EPA_LAT, C.epaxos)],
+  'Failure scenario', 'lat');
+
+mkScatter('g9',
+  [scatterDS('Cora', FAIL_CORA_TP, FAIL_CORA_LAT, C.cora),
+   scatterDS('EPaxos', FAIL_EPA_TP, FAIL_EPA_LAT, C.epaxos)]);
+
+// --- DELAYS (basic) ---
+mkLine('g10', DELAY_LABELS,
+  [lineDS('Cora', DELAY_CORA_TP, C.cora)],
+  'Delay (ms)', 'tp');
+
+mkLine('g11', DELAY_LABELS,
+  [lineDS('Cora', DELAY_CORA_LAT, C.cora)],
+  'Delay (ms)', 'lat');
+
+// --- BATCHING ---
+new Chart('g12', { type:'line', data:{
+  labels: BATCH_LABELS,
+  datasets:[
+    lineDS('Cora', BATCH_CORA_TP, C.cora),
+    lineDS('EPaxos', BATCH_EPA_TP, C.epaxos)
+  ]}, options:{
+    responsive:true, maintainAspectRatio:false,
+    plugins:{ legend:{ labels:{ color:'#a0aec0', boxWidth:12 } } },
+    scales:{ x:{...axX('Batch size'), type:'logarithmic'}, y: axTp }
+  }});
+
+new Chart('g13', { type:'line', data:{
+  labels: BATCH_LABELS,
+  datasets:[
+    lineDS('Cora avg', BATCH_CORA_LAT, C.cora),
+    lineDS('Cora P99', BATCH_CORA_P99, C.cora, [5,3]),
+    lineDS('EPaxos avg', BATCH_EPA_LAT, C.epaxos)
+  ]}, options:{
+    responsive:true, maintainAspectRatio:false,
+    plugins:{ legend:{ labels:{ color:'#a0aec0', boxWidth:12 } } },
+    scales:{ x:{...axX('Batch size'), type:'logarithmic'}, y: axLat }
+  }});
+
+mkScatter('g14',
+  [scatterDS('Cora', BATCH_CORA_TP, BATCH_CORA_LAT, C.cora),
+   scatterDS('EPaxos', BATCH_EPA_TP, BATCH_EPA_LAT, C.epaxos)]);
+
+// --- MSGSIZE ---
+new Chart('g15', { type:'line', data:{
+  labels: MSG_LABELS,
+  datasets:[
+    lineDS('Cora', MSG_CORA_TP, C.cora),
+    lineDS('EPaxos', MSG_EPA_TP, C.epaxos)
+  ]}, options:{
+    responsive:true, maintainAspectRatio:false,
+    plugins:{ legend:{ labels:{ color:'#a0aec0', boxWidth:12 } } },
+    scales:{ x:{...axX('Message size (bytes)'), type:'logarithmic'}, y: axTp }
+  }});
+
+new Chart('g16', { type:'line', data:{
+  labels: MSG_LABELS,
+  datasets:[
+    lineDS('Cora', MSG_CORA_LAT, C.cora),
+    lineDS('EPaxos', MSG_EPA_LAT, C.epaxos)
+  ]}, options:{
+    responsive:true, maintainAspectRatio:false,
+    plugins:{ legend:{ labels:{ color:'#a0aec0', boxWidth:12 } } },
+    scales:{ x:{...axX('Message size (bytes)'), type:'logarithmic'}, y: axLat }
+  }});
+
+// --- CRASH ---
+mkBar('g17', CRASH_LABELS,
+  [barDS('Cora', CRASH_CORA_TP, C.cora),
+   barDS('EPaxos', CRASH_EPA_TP, C.epaxos)],
+  'Crash scenario', 'tp');
+
+mkBar('g18', CRASH_LABELS,
+  [barDS('Cora', CRASH_CORA_LAT, C.cora),
+   barDS('EPaxos', CRASH_EPA_LAT, C.epaxos)],
+  'Crash scenario', 'lat');
+
+mkScatter('g19',
+  [scatterDS('Cora', CRASH_CORA_TP, CRASH_CORA_LAT, C.cora),
+   scatterDS('EPaxos', CRASH_EPA_TP, CRASH_EPA_LAT, C.epaxos)]);
+
+// --- NETEM DELAYS ---
+mkLine('g20', NETEM_LABELS,
+  [lineDS('Cora', NETEM_CORA_TP, C.cora),
+   lineDS('EPaxos', NETEM_EPA_TP, C.epaxos)],
+  'D1 Uniform Delay (ms)', 'tp');
+
+new Chart('g21', { type:'line', data:{
+  labels: NETEM_LABELS,
+  datasets:[
+    lineDS('Cora', NETEM_CORA_LAT, C.cora),
+    lineDS('EPaxos', NETEM_EPA_LAT, C.epaxos)
+  ]}, options:{
+    responsive:true, maintainAspectRatio:false,
+    plugins:{ legend:{ labels:{ color:'#a0aec0', boxWidth:12 } } },
+    scales:{
+      x: axX('D1 Uniform Delay (ms)'),
+      y:{ ...axLat, title:{ display:true, text:'Latency (ms)', color:'#718096' } }
+    }
+  }});
+
+// G22: scatter D1 + D4 star
+const d4Point = [{ type:'scatter', label:'D4 burst (1000ms spike)',
+  data:[{x: D4_TP, y: D4_LAT}],
+  backgroundColor: C.cabinet+'cc', borderColor: C.cabinet,
+  pointStyle:'star', pointRadius:14, pointHoverRadius:16, showLine:false }];
+
+mkScatter('g22',
+  [scatterDS('Cora D1', NETEM_CORA_TP, NETEM_CORA_LAT, C.cora),
+   scatterDS('EPaxos D1', NETEM_EPA_TP, NETEM_EPA_LAT, C.epaxos),
+   ...d4Point]);
+
+// ================================================================
+// NAV
+// ================================================================
+const SECTIONS = {
+  ratio:'sec-ratio', inflight:'sec-inflight', failures:'sec-failures',
+  delays:'sec-delays', batching:'sec-batching', msgsize:'sec-msgsize',
+  crash:'sec-crash', netem:'sec-netem'
+};
+
+function show(key) {
+  Object.values(SECTIONS).forEach(id => {
+    document.getElementById(id).classList.remove('active');
+  });
+  document.getElementById(SECTIONS[key]).classList.add('active');
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+  event.target.classList.add('active');
+}
+</script>
+</body>
+</html>
