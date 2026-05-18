@@ -149,6 +149,18 @@ func initMongoDB() {
 		mongoDbFollower = mongodb.NewMongoFollower(mongoClientNum, int(1), 0)
 	}
 
+	if mongoDbFollower == nil {
+		log.Errorf("mongodb follower initialization failed")
+		return
+	}
+
+	// In distributed mode with a MongoDB replica set, only one server should
+	// perform destructive bootstrap operations (drop/load) to avoid cross-node races.
+	if mode == Distributed && myServerID != 0 {
+		log.Infof("skipping MongoDB bootstrap on server %d (bootstrap server is 0)", myServerID)
+		return
+	}
+
 	queriesToLoad, err := mongodb.ReadQueryFromFile(mongodb.DataPath + "workload.dat")
 	if err != nil {
 		log.Errorf("getting load data failed | error: %v", err)
@@ -168,7 +180,7 @@ func initMongoDB() {
 		return
 	}
 
-	log.Infof("mongo DB initialization done")
+	log.Infof("mongo DB initialization done on server %d", myServerID)
 }
 
 // mongoDBCleanUp cleans up client connections to DB upon ctrl+C

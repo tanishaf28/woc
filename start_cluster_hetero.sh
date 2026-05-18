@@ -17,31 +17,31 @@ SSH_KEY="/home/ubuntu/.ssh/tani.pem"
 # -----------------------------
 REMOTE_DIR="/home/ubuntu/woc"
 BINARY="woc"
-CONFIG_PATH="${REMOTE_DIR}/config/cluster_hetero.conf"
+CONFIG_PATH="${REMOTE_DIR}/config/cluster_hetero_5n_2s3w.conf"
 LOG_DIR="${REMOTE_DIR}/logs"
 EVAL_DIR="${REMOTE_DIR}/eval"
 
 # -----------------------------
 # WOC PARAMETERS
 # -----------------------------
-NUM_SERVERS=5
-NUM_CLIENTS=2               
-THRESHOLD=2                 
+NUM_SERVERS="${NUM_SERVERS:-5}"
+NUM_CLIENTS="${NUM_CLIENTS:-2}"
+THRESHOLD="${THRESHOLD:-1}"
 OPS=0
 EVAL_TYPE=0
-BATCHSIZE=10                
+BATCHSIZE="${BATCHSIZE:-1}"
 MSG_SIZE=512
 MODE=1
-CONFLICT_RATE=0              
-INDEP_RATIO=100.0             
-COMMON_RATIO=00.0             
+CONFLICT_RATE="${CONFLICT_RATE:-0}"
+INDEP_RATIO="${INDEP_RATIO:-90.0}"
+COMMON_RATIO="${COMMON_RATIO:-10.0}"
 BATCH_COMPOSITION="object-specific"
-PIPELINE_MODE="true"
-MAX_INFLIGHT=5               
-USE_ADAPTIVE_LIMITER="false"
-PARALLEL_FAST_PATH="true"
-LOG_LEVEL="info"             
-ENABLE_PRIORITY="true"
+PIPELINE_MODE="${PIPELINE_MODE:-true}"
+MAX_INFLIGHT="${MAX_INFLIGHT:-5}"
+USE_ADAPTIVE_LIMITER="${USE_ADAPTIVE_LIMITER:-false}"
+PARALLEL_FAST_PATH="${PARALLEL_FAST_PATH:-true}"
+LOG_LEVEL="${LOG_LEVEL:-info}"
+ENABLE_PRIORITY="${ENABLE_PRIORITY:-true}"
 LATENCY_DEBUG="false"
 SERVER_BATCHING="false"
 
@@ -49,12 +49,12 @@ SERVER_BATCHING="false"
 # CLOUD IP LIST
 # -----------------------------
 SERVER_IPS=(
-"192.168.73.159" "192.168.73.84" "192.168.73.218" "192.168.73.219" "192.168.73.25"
+"192.168.73.159" "192.168.73.84" "192.168.73.69" "192.168.73.235" "192.168.73.194"
 )
 
 # CLIENT VMs for heterogeneous cluster
 CLIENT_HOST_IPS=(
-"192.168.73.69" "192.168.73.235"
+"192.168.73.218" "192.168.73.219"
 )
 
 CLIENTS_PER_VM=1  # One client per VM
@@ -88,8 +88,8 @@ echo "=============================================="
 echo "Copying binary to all servers and clients..."
 echo "=============================================="
 for ip in "${SERVER_IPS[@]}" "${CLIENT_HOST_IPS[@]}"; do
-    copy_binary $ip
-    copy_config $ip
+    copy_binary "$ip"
+    copy_config "$ip"
 done
 
 # -----------------------------
@@ -169,7 +169,7 @@ echo "Starting all servers (Heterogeneous Cluster)..."
 echo "=============================================="
 
 for i in "${!SERVER_IPS[@]}"; do
-    start_server $i "${SERVER_IPS[$i]}"
+    start_server "$i" "${SERVER_IPS[$i]}"
     sleep 1
 done
 
@@ -188,7 +188,7 @@ client_id=${NUM_SERVERS}
 for vm_ip in "${CLIENT_HOST_IPS[@]}"; do
     for ((c=0; c<CLIENTS_PER_VM; c++)); do
         if [ $client_id -lt $((NUM_SERVERS + NUM_CLIENTS)) ]; then
-            start_client $client_id "$vm_ip"
+            start_client "$client_id" "$vm_ip"
             ((client_id++))
             sleep 1
         fi
@@ -202,15 +202,15 @@ echo ""
 echo "Configuration:"
 echo "  Cluster Type: HETEROGENEOUS (cb16-60gb-560 & cb4-15gb-140)"
 echo "  Servers: ${NUM_SERVERS} (IDs 0-$((NUM_SERVERS-1)))"
-echo "    - IDs 0-4: cb16-60gb-560 (high-capacity)"
-echo "    - IDs 5-10: cb4-15gb-140 (low-capacity)"
+echo "    - IDs 0-1: cb16-60gb-560 (high-capacity)"
+echo "    - IDs 2-4: cb4-15gb-140 (low-capacity)"
 echo "  Clients: ${NUM_CLIENTS} (IDs ${NUM_SERVERS}-$((NUM_SERVERS+NUM_CLIENTS-1)))"
-echo "  Config File: cluster_hetero.conf"
+echo "  Config File: cluster_hetero_5n_2s3w.conf"
 echo ""
 echo "Monitor logs:"
 echo "  ssh -i $SSH_KEY ubuntu@${SERVER_IPS[0]} 'tail -f ${LOG_DIR}/server0/output.log'"
 echo "  ssh -i $SSH_KEY ubuntu@${CLIENT_HOST_IPS[0]} 'tail -f ${LOG_DIR}/client5/output.log'"
 echo ""
 echo "Stop all processes:"
-echo "  ./stop_cluster.sh"
+echo "  ./stop_cluster_hetero.sh"
 echo "=============================================="

@@ -294,6 +294,13 @@ func conJobMongoDB(args *Args, reply *Reply) error {
 		return nil
 	}
 
+	if mongoDbFollower == nil {
+		err := fmt.Errorf("mongodb follower not initialized on server %d", myServerID)
+		log.Errorf("%v", err)
+		reply.ErrorMsg = err
+		return err
+	}
+
 	if !isLeader {
 		if latencyDebug {
 			log.Debugf("[LATENCY] Follower MongoDB handling request | ClientClock=%d | ObjType=%d",
