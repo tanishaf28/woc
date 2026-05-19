@@ -561,6 +561,7 @@ func RunClient(clientID int, configPath string, numOps int, indepRatio float64, 
 
 	fileSuffix := fmt.Sprintf("client%d_eval", clientID)
 	perfM.Init(1, batchsize, fileSuffix)
+	go startMetricsServer(clientID)
 
 	rand.Seed(time.Now().UnixNano() + int64(clientID))
 	serverIDs := make([]int, 0, len(conns))
@@ -808,8 +809,10 @@ func RunClient(clientID int, configPath string, numOps int, indepRatio float64, 
 				if clientLatencyDebug {
 					log.Debugf("[CLIENT-LATENCY] Batch %d | ERROR: %v", clockVal, err)
 				}
+				RecordBatch(batchSize, 0, "ERROR", true)
 			} else {
 				recordBatchMetrics(reply, clockVal, batchSize)
+				RecordBatch(batchSize, reply.Latency, reply.PathUsed, false)
 				
 				// Adaptive limiter adjustment (based on RPC result)
 				if reply.Latency > 0 {
@@ -873,8 +876,10 @@ func RunClient(clientID int, configPath string, numOps int, indepRatio float64, 
 				for b := 0; b < currentBatch; b++ {
 					perfM.IncConflict(cmd.ClientClock)
 				}
+				RecordBatch(currentBatch, 0, "ERROR", true)
 			} else {
 				recordBatchMetrics(reply, cmd.ClientClock, currentBatch)
+				RecordBatch(currentBatch, reply.Latency, reply.PathUsed, false)
 			}
 			metricsLatency := time.Since(metricsStart)
 			
