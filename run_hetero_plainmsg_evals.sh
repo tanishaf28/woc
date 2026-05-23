@@ -10,16 +10,25 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Source sampler functions (start_tps_sampler, stop_tps_sampler,
+# inject_event, run_crash_case_sampled, run_d1_case_sampled, run_d4_case_sampled)
+# shellcheck source=sampler_replacement.sh
+source "${SCRIPT_DIR}/sampler_replacement.sh"
+
 START_SCRIPT="${SCRIPT_DIR}/start_cluster_hetero.sh"
 STOP_SCRIPT="${SCRIPT_DIR}/stop_cluster_hetero.sh"
 SSH_KEY="/home/ubuntu/.ssh/tani.pem"
 USER="ubuntu"
 REMOTE_DIR="/home/ubuntu/woc"
+CONFIG_PATH="${REMOTE_DIR}/config/cluster_hetero_new.conf"
 RESULT_ROOT="${SCRIPT_DIR}/results/hetero_plainmsg"
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
 RUN_DIR="${RESULT_ROOT}/${RUN_TS}"
+# Record run start epoch for selective archiving
+_RUN_START_EPOCH=$(date +%s)
 CLUSTER_ACTIVE=false
 ACTIVE_CLUSTER_KIND="plain"
+TIMESERIES_ENABLED=false
 
 BASE_ENV=(
     "NUM_SERVERS=5"
@@ -43,11 +52,11 @@ BASE_ENV=(
 )
 
 SERVER_IPS=(
-    "192.168.73.159"
-    "192.168.73.84"
-    "192.168.73.69"
-    "192.168.73.235"
-    "192.168.73.194"
+    "192.168.73.59"
+    "192.168.73.243"
+    "192.168.73.192"
+    "192.168.73.134"
+    "192.168.73.132"
 )
 
 CLIENT_IPS=(
@@ -60,6 +69,8 @@ FAULT_PRE_DELAY_SECONDS="${FAULT_PRE_DELAY_SECONDS:-5}"
 EVAL_ONLY="${1:-all}"
 
 mkdir -p "$RUN_DIR"
+# Create a run-start marker so archival picks up files copied after this point
+touch "${RUN_DIR}/.run_start_marker"
 
 remote_exec() {
     local host=$1
@@ -96,23 +107,30 @@ archive_latest_result() {
     local label=$1
     local dest_dir="${RUN_DIR}/${label}"
     mkdir -p "$dest_dir"
-    local marker="${RUN_DIR}/.last_archive_ts"
-    local find_args=()
-    if [ -f "$marker" ]; then
-        find_args=(-newer "$marker")
-    fi
 
     local merged_dir="${SCRIPT_DIR}/eval/merged"
     if [ -d "$merged_dir" ]; then
-        find "$merged_dir" -maxdepth 1 -name "*.csv" "${find_args[@]}" \
+        # Only copy CSVs newer than this run started (use marker)
+        find "$merged_dir" -maxdepth 1 -name "*.csv" \
+            -newer "${RUN_DIR}/.run_start_marker" \
             -exec cp {} "$dest_dir/" \; 2>/dev/null || true
 
+        # Fallback: if nothing matched, take the newest one
         if [ -z "$(ls "$dest_dir"/*.csv 2>/dev/null)" ]; then
-            cp "$merged_dir"/*.csv "$dest_dir/" 2>/dev/null || true
+            local newest
+            newest=$(ls -t "$merged_dir"/*.csv 2>/dev/null | head -1)
+            [ -n "$newest" ] && cp "$newest" "$dest_dir/"
         fi
     fi
 
-    touch "$marker"
+    # Timeline files: only copy ones with timestamps AFTER run started
+    # The filename itself contains the timestamp: tps_timeline_YYYYMMDD_HHMMSS.csv
+    local timeline_src="${SCRIPT_DIR}/eval"
+    if [ "${TIMESERIES_ENABLED:-false}" = "true" ] && [ -d "$timeline_src" ]; then
+        find "$timeline_src" -name "tps_timeline_*.csv" \
+            -newer "${RUN_DIR}/.run_start_marker" \
+            -exec cp {} "$dest_dir/" \; 2>/dev/null || true
+    fi
 
     echo "  Archived results to: $dest_dir"
     ls -1 "$dest_dir"/*.csv 2>/dev/null | sed 's|.*/|    |' || echo "  (no CSVs found)"
@@ -818,14 +836,13 @@ archive_latest_result() {
     Usage: bash run_hetero_plainmsg_evals.sh [selector]
     Usage: bash run_hetero_plainmsg_evals.sh [selector|--selector]
 
-    Selectors (default: all):
-      eval1          Independent vs Common ratio sweep
-      eval2          Max inflight sweep
-      eval3          Fault tolerance (static node failures)
-      eval_batching  Batch size sweep
-      eval_msgsize   Message size sweep
-      eval_crash     Crash fault injection (leader/follower/random)
-            eval4          Network delay: D1 uniform sweep + D4 burst stress
+        Selectors (default: all):
+            eval1          Independent vs Common ratio sweep
+            eval2          Max inflight sweep
+            eval_batching  Batch size sweep
+            eval_msgsize   Message size sweep
+            eval_crash     Crash fault injection (leader/follower/random)
+                        eval4          Network delay: D1 uniform sweep + D4 burst stress
 
         eval4 (Cabinet §5.3):
             D1: uniform  0 / 5 / 10 / 20 / 50 / 100 / 200ms  (fixed MAX_INFLIGHT=10)
@@ -847,7 +864,7 @@ EOF
     fi
 
     case "${EVAL_ONLY}" in
-        all|eval1|eval2|eval3|eval_batching|eval_msgsize|eval_crash|eval4)
+        all|eval1|eval2|eval_batching|eval_msgsize|eval_crash|eval4|eval4s)
             ;;
         *)
             echo "ERROR: unknown selector '${EVAL_ONLY}'"
@@ -885,10 +902,10 @@ EOF
     fi
 
     # ================================================================
-    # EVAL 2: max inflight sweep
+    # EVAL 2: max inflight sweep (capped at 40)
     # ================================================================
     if [[ "$EVAL_ONLY" == "all" || "$EVAL_ONLY" == "eval2" ]]; then
-        for value in 1 2 3 4 5 8 10 15 20 25 30 35 40 45 50; do
+        for value in 1 2 3 4 5 8 10 15 20 25 30 35 40; do
             BASE_ENV=(
                 "NUM_SERVERS=5" "NUM_CLIENTS=2" "THRESHOLD=1" "OPS=0"
                 "EVAL_TYPE=0" "BATCHSIZE=1" "MSG_SIZE=512" "MODE=1"
@@ -898,30 +915,6 @@ EOF
                 "LOG_LEVEL=info" "ENABLE_PRIORITY=true" "SERVER_BATCHING=false"
             )
             run_case "eval2_max_inflight_${value}" "$RUNTIME_SECONDS"
-        done
-    fi
-
-    # ================================================================
-    # EVAL 3: static fault tolerance
-    # ================================================================
-    if [[ "$EVAL_ONLY" == "all" || "$EVAL_ONLY" == "eval3" ]]; then
-        BASE_ENV=(
-            "NUM_SERVERS=5" "NUM_CLIENTS=2" "THRESHOLD=1" "OPS=0"
-            "EVAL_TYPE=0" "BATCHSIZE=1" "MSG_SIZE=512" "MODE=1"
-            "CONFLICT_RATE=0" "INDEP_RATIO=90.0" "COMMON_RATIO=10.0"
-            "PIPELINE_MODE=true" "MAX_INFLIGHT=5"
-            "USE_ADAPTIVE_LIMITER=false" "PARALLEL_FAST_PATH=true"
-            "LOG_LEVEL=info" "ENABLE_PRIORITY=true" "SERVER_BATCHING=false"
-        )
-        for scenario in "no_failure|" "node0_fails|0" "node1_fails|1" \
-                        "node4_fails|4" "node0_node1_fail|0,1"; do
-            label="${scenario%%|*}"
-            nodes="${scenario#*|}"
-            if [ -z "$nodes" ]; then
-                run_case "eval3_${label}" "$RUNTIME_SECONDS"
-            else
-                run_fault_case "eval3_${label}" "$nodes"
-            fi
         done
     fi
 
@@ -961,35 +954,131 @@ EOF
 
     # ================================================================
     # EVAL crash: fault injection (hetero cluster)
+    # Uses sampled versions → produces tps_timeline.csv per run
+    # for time-series graphs (TPS over rounds, crash dip + recovery)
     # ================================================================
     if [[ "$EVAL_ONLY" == "all" || "$EVAL_ONLY" == "eval_crash" ]]; then
+        TIMESERIES_ENABLED=true
+        # Save/override timing for crash evals to ensure long observation window
+        _SAVED_RUNTIME=$RUNTIME_SECONDS
+        RUNTIME_SECONDS=60
+        _SAVED_CRASH_TRIGGER=${CRASH_TRIGGER_SECONDS:-10}
+        CRASH_TRIGGER_SECONDS=15
+
         BASE_ENV=(
             "NUM_SERVERS=5" "NUM_CLIENTS=2" "THRESHOLD=1" "OPS=0"
             "EVAL_TYPE=0" "BATCHSIZE=1" "MSG_SIZE=512" "MODE=1"
-            "CONFLICT_RATE=10" "INDEP_RATIO=70.0" "COMMON_RATIO=20.0"
+            "CONFLICT_RATE=0" "INDEP_RATIO=90.0" "COMMON_RATIO=10.0"
             "PIPELINE_MODE=true" "MAX_INFLIGHT=5"
             "USE_ADAPTIVE_LIMITER=false" "PARALLEL_FAST_PATH=true"
+            "ENABLE_TIMESERIES=true"
             "LOG_LEVEL=info" "ENABLE_PRIORITY=true" "SERVER_BATCHING=false"
         )
-        run_case             "eval_crash_no_failure"  "$RUNTIME_SECONDS"
-        run_crash_case       "eval_crash_leader"      "leader"
-        run_crash_case       "eval_crash_follower1"   "follower:1"
-        run_crash_case       "eval_crash_follower4"   "follower:4"
-        run_crash_case       "eval_crash_f_of_n1"     "f_of_n:1"
+        # Baseline: no crash, sampled so we get a clean TPS time-series
+        run_crash_case_sampled "eval_crash_no_failure"  "no_failure"
+        # Crash the leader (server 0 = highest-priority, strong node)
+        run_crash_case_sampled "eval_crash_leader"      "leader"
+        # Crash a strong follower (server 1)
+        run_crash_case_sampled "eval_crash_follower1"   "follower:1"
+        # Crash a weak follower (server 4)
+        run_crash_case_sampled "eval_crash_follower4"   "follower:4"
+        # Kill f=1 random follower (reproduces Cabinet "random kill" curve)
+        run_crash_case_sampled "eval_crash_f_of_n1"     "f_of_n:1"
+
+        # Restore original timing
+        RUNTIME_SECONDS=${_SAVED_RUNTIME}
+        CRASH_TRIGGER_SECONDS=${_SAVED_CRASH_TRIGGER}
+        TIMESERIES_ENABLED=false
     fi
 
     # ================================================================
     # EVAL 4: Network delay — D1/D2/D3/D4 (Cabinet §5.3)
     # ================================================================
     if [[ "$EVAL_ONLY" == "all" || "$EVAL_ONLY" == "eval4" ]]; then
+        TIMESERIES_ENABLED=true
 
         echo ""
         echo "╔════════════════════════════════════════════════════════════════╗"
         echo "║  EVAL 4: Network Delay  (Cabinet §5.3  D1/D4)                ║"
         echo "╚════════════════════════════════════════════════════════════════╝"
 
-        # D1: Uniform delay sweep with fixed MAX_INFLIGHT=10
+        # D1: Uniform delays - scale MAX_INFLIGHT with delay, longer runtime
+        _SAVED_RUNTIME=$RUNTIME_SECONDS
+        RUNTIME_SECONDS=45   # enough for a clear steady-state window
+
+        echo ""
         echo "── D1: Uniform delays ──────────────────────────────────────────"
+        # Format: "delay_ms max_inflight"
+        # MAX_INFLIGHT scaled so it's never the bottleneck:
+        #   rule of thumb: MAX_INFLIGHT = ceil(target_tps_per_client * latency_s)
+        #   target ~800 TPS/client; latency ≈ 2-3× delay + 2ms base
+        D1_CASES=(
+            "0   10"
+            "5   15"
+            "10  20"
+            "20  30"
+            "50  60"
+            "100 100"
+            "200 150"
+        )
+
+        for entry in "${D1_CASES[@]}"; do
+            delay_ms=$(echo $entry | awk '{print $1}')
+            inflight=$(echo $entry | awk '{print $2}')
+            if [ "$delay_ms" -eq 0 ]; then
+                jitter_ms=0
+            else
+                jitter_ms=$(( delay_ms / 5 ))
+            fi
+            BASE_ENV=(
+                "NUM_SERVERS=5" "NUM_CLIENTS=2" "THRESHOLD=1" "OPS=0"
+                "EVAL_TYPE=0" "BATCHSIZE=1" "MSG_SIZE=512" "MODE=1"
+                "CONFLICT_RATE=0" "INDEP_RATIO=90.0" "COMMON_RATIO=10.0"
+                "PIPELINE_MODE=true" "MAX_INFLIGHT=${inflight}"
+                "USE_ADAPTIVE_LIMITER=false" "PARALLEL_FAST_PATH=true"
+                "ENABLE_TIMESERIES=true"
+                "LOG_LEVEL=info" "ENABLE_PRIORITY=true" "SERVER_BATCHING=false"
+            )
+            run_d1_case_sampled "eval4_D1_${delay_ms}ms" "$delay_ms" "$jitter_ms"
+        done
+
+        RUNTIME_SECONDS=${_SAVED_RUNTIME}
+        TIMESERIES_ENABLED=false
+
+        # D4: Bursting
+        echo "── D4: Bursting (10s calm / 5s spike at 1000ms) ────────────────"
+        BASE_ENV=(
+            "NUM_SERVERS=5" "NUM_CLIENTS=2" "THRESHOLD=1" "OPS=0"
+            "EVAL_TYPE=0" "BATCHSIZE=1" "MSG_SIZE=512" "MODE=1"
+            "CONFLICT_RATE=0" "INDEP_RATIO=90.0" "COMMON_RATIO=10.0"
+            "PIPELINE_MODE=true" "MAX_INFLIGHT=10"
+            "USE_ADAPTIVE_LIMITER=false" "PARALLEL_FAST_PATH=true"
+            "ENABLE_TIMESERIES=true"
+            "LOG_LEVEL=info" "ENABLE_PRIORITY=true" "SERVER_BATCHING=false"
+        )
+        D4_RUNTIME=$(( RUNTIME_SECONDS < 90 ? 90 : RUNTIME_SECONDS ))
+        # calm=15s burst=10s gives ~2-3 full cycles in 90s, clearly visible
+        run_d4_case_sampled "eval4_D4_burst" 15 10 "$D4_RUNTIME"
+
+    fi  # end eval4
+
+    # ================================================================
+    # EVAL 4s: Network delay — same as eval4 but fixed MAX_INFLIGHT=5
+    # ================================================================
+    if [[ "$EVAL_ONLY" == "all" || "$EVAL_ONLY" == "eval4s" ]]; then
+        TIMESERIES_ENABLED=true
+
+        echo ""
+        echo "╔════════════════════════════════════════════════════════════════╗"
+        echo "║  EVAL 4s: Network Delay (fixed MAX_INFLIGHT=1)                ║"
+        echo "╚════════════════════════════════════════════════════════════════╝"
+
+        # D1: Uniform delays with fixed MAX_INFLIGHT=5
+        _SAVED_RUNTIME=$RUNTIME_SECONDS
+        RUNTIME_SECONDS=45
+
+        echo ""
+        echo "── D1: Uniform delays (MAX_INFLIGHT=5) ──────────────────────────"
         D1_DELAYS=(0 5 10 20 50 100 200)
 
         for delay_ms in "${D1_DELAYS[@]}"; do
@@ -1002,27 +1091,33 @@ EOF
                 "NUM_SERVERS=5" "NUM_CLIENTS=2" "THRESHOLD=1" "OPS=0"
                 "EVAL_TYPE=0" "BATCHSIZE=1" "MSG_SIZE=512" "MODE=1"
                 "CONFLICT_RATE=0" "INDEP_RATIO=90.0" "COMMON_RATIO=10.0"
-                "PIPELINE_MODE=true" "MAX_INFLIGHT=10"
+                "PIPELINE_MODE=true" "MAX_INFLIGHT=5"
                 "USE_ADAPTIVE_LIMITER=false" "PARALLEL_FAST_PATH=true"
+                "ENABLE_TIMESERIES=true"
                 "LOG_LEVEL=info" "ENABLE_PRIORITY=true" "SERVER_BATCHING=false"
             )
-            run_d1_case "eval4_D1_${delay_ms}ms" "$delay_ms" "$jitter_ms"
+            run_d1_case_sampled "eval4s_D1_${delay_ms}ms" "$delay_ms" "$jitter_ms"
         done
 
-        # D4: Bursting
-        echo "── D4: Bursting (10s calm / 5s spike at 1000ms) ────────────────"
+        RUNTIME_SECONDS=${_SAVED_RUNTIME}
+        TIMESERIES_ENABLED=false
+
+        # D4: Bursting with MAX_INFLIGHT=5
+        echo "── D4: Bursting (MAX_INFLIGHT=5, 15s calm / 10s spike) ──────────"
         BASE_ENV=(
             "NUM_SERVERS=5" "NUM_CLIENTS=2" "THRESHOLD=1" "OPS=0"
             "EVAL_TYPE=0" "BATCHSIZE=1" "MSG_SIZE=512" "MODE=1"
             "CONFLICT_RATE=0" "INDEP_RATIO=90.0" "COMMON_RATIO=10.0"
-            "PIPELINE_MODE=true" "MAX_INFLIGHT=10"
+            "PIPELINE_MODE=true" "MAX_INFLIGHT=5"
             "USE_ADAPTIVE_LIMITER=false" "PARALLEL_FAST_PATH=true"
+            "ENABLE_TIMESERIES=true"
             "LOG_LEVEL=info" "ENABLE_PRIORITY=true" "SERVER_BATCHING=false"
         )
-        D4_RUNTIME=$(( RUNTIME_SECONDS < 45 ? 45 : RUNTIME_SECONDS ))
-        run_d4_case "eval4_D4_burst" 10 5 "$D4_RUNTIME"
+        D4_RUNTIME=$(( RUNTIME_SECONDS < 90 ? 90 : RUNTIME_SECONDS ))
+        run_d4_case_sampled "eval4s_D4_burst" 15 10 "$D4_RUNTIME"
 
-    fi  # end eval4
+        TIMESERIES_ENABLED=false
+    fi  # end eval4s
 
     echo ""
     echo "=================================================="

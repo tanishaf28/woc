@@ -17,7 +17,7 @@ SSH_KEY="/home/ubuntu/.ssh/tani.pem"
 # -----------------------------
 REMOTE_DIR="/home/ubuntu/woc"
 BINARY="woc"
-CONFIG_PATH="${REMOTE_DIR}/config/cluster_hetero_5n_2s3w.conf"
+CONFIG_PATH="${REMOTE_DIR}/config/cluster_hetero_new.conf"
 LOG_DIR="${REMOTE_DIR}/logs"
 EVAL_DIR="${REMOTE_DIR}/eval"
 
@@ -49,7 +49,7 @@ SERVER_BATCHING="false"
 # CLOUD IP LIST
 # -----------------------------
 SERVER_IPS=(
-"192.168.73.159" "192.168.73.84" "192.168.73.69" "192.168.73.235" "192.168.73.194"
+"192.168.73.59" "192.168.73.243" "192.168.73.192" "192.168.73.134" "192.168.73.132"
 )
 
 # CLIENT VMs for heterogeneous cluster
@@ -140,6 +140,8 @@ start_client() {
         mkdir -p ${LOG_DIR}/client${CLIENT_ID} ${EVAL_DIR}/client${CLIENT_ID}
         PIPELINE_MODE=${PIPELINE_MODE} \
         MAX_INFLIGHT=${MAX_INFLIGHT} \
+        ENABLE_TIMESERIES=${ENABLE_TIMESERIES:-false} \
+        TPS_TIMELINE_INTERVAL_MS=${TPS_TIMELINE_INTERVAL_MS:-500} \
         nohup ./$BINARY \
             -id=${CLIENT_ID} \
             -n=${NUM_SERVERS} \
@@ -179,6 +181,16 @@ sleep 15
 # -----------------------------
 # START CLIENTS
 # -----------------------------
+echo "Cleaning previous timeline files from client VMs..."
+for vm_ip in "${CLIENT_HOST_IPS[@]}"; do
+    ssh -i $SSH_KEY $USER@$vm_ip "
+        rm -f ${EVAL_DIR}/client*/tps_timeline_*.csv 2>/dev/null || true
+        echo 'Cleaned timeline files on ${vm_ip}'
+    " &
+done
+wait
+echo "Client dirs cleaned."
+
 echo "=============================================="
 echo "Starting ${NUM_CLIENTS} clients (${CLIENTS_PER_VM} per VM)..."
 echo "=============================================="
@@ -200,12 +212,10 @@ echo " WOC heterogeneous cluster launched successfully!"
 echo "=============================================="
 echo ""
 echo "Configuration:"
-echo "  Cluster Type: HETEROGENEOUS (cb16-60gb-560 & cb4-15gb-140)"
+echo "  Cluster Type: HETEROGENEOUS (5 servers + 2 clients)"
 echo "  Servers: ${NUM_SERVERS} (IDs 0-$((NUM_SERVERS-1)))"
-echo "    - IDs 0-1: cb16-60gb-560 (high-capacity)"
-echo "    - IDs 2-4: cb4-15gb-140 (low-capacity)"
 echo "  Clients: ${NUM_CLIENTS} (IDs ${NUM_SERVERS}-$((NUM_SERVERS+NUM_CLIENTS-1)))"
-echo "  Config File: cluster_hetero_5n_2s3w.conf"
+echo "  Config File: cluster_hetero_new.sh"
 echo ""
 echo "Monitor logs:"
 echo "  ssh -i $SSH_KEY ubuntu@${SERVER_IPS[0]} 'tail -f ${LOG_DIR}/server0/output.log'"

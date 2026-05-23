@@ -18,6 +18,7 @@ REMOTE_LOG_DIR="${REMOTE_DIR}/logs"
 BINARY="woc"
 CONFIG_PATH_LOCAL="${SCRIPT_DIR}/config/cluster_homo.conf"
 CONFIG_PATH_REMOTE="${REMOTE_DIR}/config/cluster_homo.conf"
+MERGE_SCRIPT="${SCRIPT_DIR}/merge_eval.py"
 
 SERVER_COUNTS=(3 5 7 11 20 30 40)
 CLIENT_IPS=(
@@ -39,8 +40,8 @@ BASE_ENV=(
     "MSG_SIZE=512"
     "MODE=1"
     "CONFLICT_RATE=0"
-    "INDEP_RATIO=100.0"
-    "COMMON_RATIO=0.0"
+    "INDEP_RATIO=90.0"
+    "COMMON_RATIO=10.0"
     "BATCH_COMPOSITION=object-specific"
     "PIPELINE_MODE=true"
     "USE_ADAPTIVE_LIMITER=false"
@@ -111,6 +112,34 @@ archive_case() {
     done
 }
 
+merge_case_results() {
+    local label=$1
+    local server_count=$2
+    local client_count=$3
+    local case_dir="${RUN_DIR}/${label}"
+    local case_eval_dir="${case_dir}/eval"
+    local case_merged_dir="${case_dir}/merged"
+    local client_start_id=$server_count
+    local client_end_id=$((server_count + client_count - 1))
+    local client_id_filter="${client_start_id}-${client_end_id}"
+    local server_id_filter="0-$((server_count - 1))"
+
+    mkdir -p "$case_eval_dir" "$case_merged_dir"
+
+    for node_dir in "${case_dir}"/node_*; do
+        [ -d "$node_dir/eval" ] || continue
+        cp -r "$node_dir/eval/"* "$case_eval_dir/" 2>/dev/null || true
+    done
+
+    echo "Merging client and server CSVs for ${label}..."
+    if [ -f "$MERGE_SCRIPT" ]; then
+        python3 "$MERGE_SCRIPT" "$case_eval_dir" "$case_merged_dir/" --ids "$client_id_filter"
+        python3 "$MERGE_SCRIPT" "$case_eval_dir" "$case_merged_dir/" --servers --ids "$server_id_filter"
+    else
+        echo " ✗ merge_eval.py not found at ${MERGE_SCRIPT}"
+    fi
+}
+
 start_server() {
     local server_id=$1
     local host=$2
@@ -132,8 +161,8 @@ nohup ./$BINARY \
     -role=0 \
     -ops=0 \
     -b=1 \
-    -indep=100.0 \
-    -common=0.0 \
+    -indep=90.0 \
+    -common=10.0 \
     -et=0 \
     -ms=512 \
     -mode=1 \
@@ -165,8 +194,8 @@ nohup ./$BINARY \
     -pd=true \
     -role=1 \
     -b=1 \
-    -indep=100.0 \
-    -common=0.0 \
+    -indep=90.0 \
+    -common=10.0 \
     -conflictrate=0 \
     -bcomp=object-specific \
     -ms=512 \
@@ -179,7 +208,7 @@ EOF
 run_case() {
     local server_count=$1
     local label="homo_${server_count}"
-    local max_inflight=$server_count
+    local max_inflight=8
     local client_count=${#CLIENT_IPS[@]}
 
     read_server_ips "$server_count"
@@ -215,6 +244,7 @@ run_case() {
 
     stop_nodes "${SERVER_IPS[@]}" "${CLIENT_IPS[@]}"
     archive_case "$label" "${SERVER_IPS[@]}" "${CLIENT_IPS[@]}"
+    merge_case_results "$label" "$server_count" "$client_count"
 }
 
 cleanup() {

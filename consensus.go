@@ -923,13 +923,19 @@ func (cm *ConsensusManager) forwardToLeaderOptimized(args *Args, reply *Reply) (
 			}
 		} else {
 			// Became leader during failover - process locally
+			var payload interface{}
+			if args.Type == MongoDB {
+				payload = args.CmdMongo
+			} else {
+				payload = args.CmdPlain
+			}
 			cmd := Command{
 				ClientID:    args.ClientID,
 				ClientClock: args.ClientClock,
 				ObjID:       args.ObjID,
 				ObjType:     args.ObjType,
 				CmdType:     args.CmdType,
-				Payload:     args.CmdPlain,
+				Payload:     payload,
 				ForwardedBy: cm.mystate.GetMyServerID(), 
 			}
 			return cm.handleSlowPath(cmd)

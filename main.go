@@ -140,6 +140,12 @@ func runServerRole() {
 		log.Fatalf("Server %d: rpc.Register failed: %v", myServerID, err)
 	}
 
+	if evalType == MongoDB {
+		go mongoDBCleanUp()
+		initMongoDB()
+		log.Infof("Server %d: ✓ MongoDB initialized", myServerID)
+	}
+
 	listener, err := net.Listen("tcp", myAddr)
 	if err != nil {
 		log.Fatalf("Server %d: ListenTCP failed: %v", myServerID, err)

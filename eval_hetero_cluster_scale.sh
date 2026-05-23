@@ -20,6 +20,7 @@ CLIENT_IPS=(
     "192.168.73.218"
     "192.168.73.219"
 )
+MERGE_SCRIPT="${SCRIPT_DIR}/merge_eval.py"
 
 WORKLOAD="${WORKLOAD:-a}"
 RUNTIME_SECONDS="${RUNTIME_SECONDS:-30}"
@@ -32,9 +33,9 @@ SERVER_COUNTS=(3 5 7 11 15)
 declare -A CONFIG_BY_COUNT=(
     [3]="config/cluster_hetero_3n_2s_1w.conf"
     [5]="config/cluster_hetero_5n_2s3w.conf"
-    [7]="config/cluster_hetero_3s_4w.conf"
-    [11]="config/cluster_hetero_4s_7w.conf"
-    [15]="config/cluster_hetero_6s_9w.conf"
+    [7]="config/cluster_hetero_7n_3s_4w.conf"
+    [11]="config/cluster_hetero_11n_4s_7w.conf"
+    [15]="config/cluster_hetero_15n_6s_9w.conf"
 )
 
 BASE_ENV=(
@@ -120,6 +121,34 @@ archive_case() {
     done
 }
 
+merge_case_results() {
+    local label=$1
+    local server_count=$2
+    local client_count=$3
+    local case_dir="${RUN_DIR}/${label}"
+    local case_eval_dir="${case_dir}/eval"
+    local case_merged_dir="${case_dir}/merged"
+    local client_start_id=$server_count
+    local client_end_id=$((server_count + client_count - 1))
+    local client_id_filter="${client_start_id}-${client_end_id}"
+    local server_id_filter="0-$((server_count - 1))"
+
+    mkdir -p "$case_eval_dir" "$case_merged_dir"
+
+    for node_dir in "${case_dir}"/node_*; do
+        [ -d "$node_dir/eval" ] || continue
+        cp -r "$node_dir/eval/"* "$case_eval_dir/" 2>/dev/null || true
+    done
+
+    echo "Merging client and server CSVs for ${label}..."
+    if [ -f "$MERGE_SCRIPT" ]; then
+        python3 "$MERGE_SCRIPT" "$case_eval_dir" "$case_merged_dir/" --ids "$client_id_filter"
+        python3 "$MERGE_SCRIPT" "$case_eval_dir" "$case_merged_dir/" --servers --ids "$server_id_filter"
+    else
+        echo " ✗ merge_eval.py not found at ${MERGE_SCRIPT}"
+    fi
+}
+
 start_server() {
     local server_id=$1
     local host=$2
@@ -192,7 +221,7 @@ run_case() {
     local config_local="${CONFIG_BY_COUNT[$server_count]}"
     local config_remote="${REMOTE_DIR}/$(basename "$config_local")"
     local label="hetero_${server_count}"
-    local max_inflight=$server_count
+    local max_inflight=5
 
     read_server_ips "$config_local" "$server_count"
 
@@ -228,6 +257,7 @@ run_case() {
 
     stop_nodes "${SERVER_IPS[@]}" "${CLIENT_IPS[@]}"
     archive_case "$label" "${SERVER_IPS[@]}" "${CLIENT_IPS[@]}"
+    merge_case_results "$label" "$server_count" "${#CLIENT_IPS[@]}"
 }
 
 cleanup() {

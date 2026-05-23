@@ -342,8 +342,20 @@ func conJobMongoDB(args *Args, reply *Reply) error {
 			return reply.ErrorMsg
 		}
 		
+		ok, pathUsed := cm.forwardToLeaderOptimized(args, reply)
+		followerLatency := time.Since(start)
+
+		if latencyDebug {
+			log.Debugf("[LATENCY-BREAKDOWN] Follower MongoDB forward-to-leader | ClientClock=%d | Path=%s | Latency=%vms",
+				args.ClientClock, pathUsed, followerLatency.Milliseconds())
+		}
+
 		reply.ExeResult = time.Since(start).String()
-		return fmt.Errorf("MongoDB Dependent forwarding not yet implemented")
+
+		if !ok {
+			reply.ErrorMsg = fmt.Errorf("MongoDB forward to leader failed")
+		}
+		return reply.ErrorMsg
 	}
 
 	cmd := Command{
