@@ -220,11 +220,15 @@ set -e
 cd $REMOTE_DIR
 nohup ./$BINARY \
     -id=$i \
-    -conf=$CONFIG_PATH \
-    -eval_type=1 \
-    -mongodb \
-    -workload=$WORKLOAD \
-    -num_clients=$NUM_CLIENTS \
+    -path=$CONFIG_PATH \
+    -et=1 \
+    -n=$NUM_SERVERS \
+    -t=$THRESHOLD \
+    -b=$BATCHSIZE \
+    -mode=$MODE \
+    -mcli=$NUM_CLIENTS \
+    -mload=$WORKLOAD \
+    -role=0 \
     > $log_file 2>&1 &
 echo \$! > /tmp/woc_${i}.pid
 EOF
@@ -249,10 +253,14 @@ set -e
 cd $REMOTE_DIR
 nohup ./$BINARY \
     -id=$client_id \
-    -conf=$CONFIG_PATH \
-    -eval_type=1 \
-    -mongodb \
-    -workload=$WORKLOAD \
+    -path=$CONFIG_PATH \
+    -et=1 \
+    -n=$NUM_SERVERS \
+    -t=$THRESHOLD \
+    -b=$BATCHSIZE \
+    -mode=$MODE \
+    -role=1 \
+    -mload=$WORKLOAD \
     > $log_file 2>&1 &
 EOF
         sleep 0.5

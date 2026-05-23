@@ -290,6 +290,15 @@ func conJobMongoDB(args *Args, reply *Reply) error {
 		reply.Success = true
 		reply.Accepted = true
 		reply.ExeResult = time.Since(start).String()
+
+		if mongoDbFollower != nil && len(args.CmdMongo) > 0 {
+			queries := append([]mongodb.Query(nil), args.CmdMongo...)
+			go func(clientClock int, asyncQueries []mongodb.Query) {
+				if _, _, err := mongoDbFollower.FollowerAPI(asyncQueries); err != nil {
+					log.Errorf("[SLOW-FOLLOWER] MongoDB async apply failed | ClientClock=%d | err: %v", clientClock, err)
+				}
+			}(args.ClientClock, queries)
+		}
 		
 		return nil
 	}
@@ -327,13 +336,12 @@ func conJobMongoDB(args *Args, reply *Reply) error {
 			reply.ExeResult = time.Since(start).String()
 			
 			if ok {
-				_, queryLatency, err := mongoDbFollower.FollowerAPI(args.CmdMongo)
+				_, _, err := mongoDbFollower.FollowerAPI(args.CmdMongo)
 				if err != nil {
 					log.Errorf("MongoDB follower execution failed | err: %v", err)
 					reply.ErrorMsg = err
 					return err
 				}
-				reply.Latency = float64(queryLatency.Milliseconds())
 			}
 			
 			if !ok {
@@ -374,14 +382,13 @@ func conJobMongoDB(args *Args, reply *Reply) error {
 	reply.Accepted = ok
 
 	if ok {
-		_, queryLatency, err := mongoDbFollower.FollowerAPI(args.CmdMongo)
+		_, _, err := mongoDbFollower.FollowerAPI(args.CmdMongo)
 		if err != nil {
 			log.Errorf("MongoDB leader execution failed | err: %v", err)
 			reply.ErrorMsg = err
 			reply.ExeResult = time.Since(start).String()
 			return err
 		}
-		reply.Latency = float64(queryLatency.Milliseconds())
 	}
 
 	reply.ExeResult = fmt.Sprintf("Total:%vms", time.Since(start).Milliseconds())
