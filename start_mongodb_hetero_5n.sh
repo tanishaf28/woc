@@ -101,7 +101,7 @@ MONGODB_REPLICA_SET="wocrs"
 REMOTE_DIR="/home/ubuntu/woc"
 
 # Stop existing MongoDB if running.
-pkill -f mongod 2>/dev/null || true
+pkill -x mongod 2>/dev/null || true
 sleep 1
 
 # Clear stale database state from previous runs, then recreate directories.
