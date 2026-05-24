@@ -121,13 +121,14 @@ start_workload_nodes() {
     echo "  Starting WOC servers..."
     for i in "${!SERVER_IPS[@]}"; do
         ip="${SERVER_IPS[$i]}"
-        remote_exec "$ip" "pkill -f 'woc.*-conf' 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=$i -conf='$CONFIG_PATH' -eval_type=1 -mongodb -workload='$WORKLOAD' -max_inflight=$max_inflight > '$LOG_DIR/server_${i}_inflight_${max_inflight}.log' 2>&1 &"
+        remote_exec "$ip" "pkill -f 'woc.*-path' 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=$i -path='$CONFIG_PATH' -et=1 -n=5 -t=1 -role=0 -mload='$WORKLOAD' -max_inflight=$max_inflight > '$LOG_DIR/server_${i}_inflight_${max_inflight}.log' 2>&1 &"
     done
 
     echo "  Starting WOC clients..."
     for i in "${!CLIENT_HOST_IPS[@]}"; do
         ip="${CLIENT_HOST_IPS[$i]}"
-        remote_exec "$ip" "pkill -f 'woc.*-conf' 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=-1 -conf='$CONFIG_PATH' -eval_type=1 -mongodb -workload='$WORKLOAD' -max_inflight=$max_inflight > '$LOG_DIR/client_${i}_inflight_${max_inflight}.log' 2>&1 &"
+        client_id=$((5 + i))
+        remote_exec "$ip" "pkill -f 'woc.*-path' 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=$client_id -path='$CONFIG_PATH' -et=1 -n=5 -t=1 -role=1 -mload='$WORKLOAD' -max_inflight=$max_inflight > '$LOG_DIR/client_${i}_inflight_${max_inflight}.log' 2>&1 &"
     done
 }
 

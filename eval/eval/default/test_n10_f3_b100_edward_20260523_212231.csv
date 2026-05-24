@@ -1,0 +1,14 @@
+pclock,latency (ms) per batch,throughput (Tx/sec),fast path ops,slow path ops,conflict ops
+1,1589.373,6291.789,0,0,0
+2,2257.461,4429.755,0,0,0
+AVERAGE,1923.417 ms,5199.077 Tx/sec,0.000,0.000,0.000
+THROUGHPUT,,5199.077 Tx/sec,,,
+P50_LATENCY,2257 ms,,,,
+P95_LATENCY,2257 ms,,,,
+P99_LATENCY,2257 ms,,,,
+AVG_LATENCY_PER_TX,0.192 ms/Tx,,,,
+GLOBAL_TOTALS,,,0 ops,0 ops,0 ops
+TOTAL_FAST_PATH_FALLBACKS,0,ops
+TOTAL_FAST_COMMITS,0,ops
+TOTAL_SLOW_COMMITS,0,ops
+TOTAL_CONFLICT_COMMITS,0,ops

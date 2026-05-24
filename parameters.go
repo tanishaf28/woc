@@ -111,7 +111,7 @@ func loadCommandLineInputs() {
 	flag.StringVar(&suffix, "suffix", "woc", "suffix of files")
 	flag.IntVar(&role, "role", 0, "0 -> server ; 1 -> client ")
 	flag.IntVar(&conflictrate, "conflictrate", 10, "Conflict Rate ")
-	flag.StringVar(&batchComposition, "bcomp", "mixed", "batch composition: 'mixed' = all object types in one batch | 'object-specific' = separate batches for indep/common/hot")
+	flag.StringVar(&batchComposition, "bcomp", "object-specific", "batch composition: 'mixed' = all object types in one batch | 'object-specific' = separate batches for indep/common/hot")
 	flag.Parse()
 	quorum = threshold + 1
 

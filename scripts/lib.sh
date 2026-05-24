@@ -89,7 +89,7 @@ run_woc_client() {
     local ts=$(date +%s)
     local rand=$(od -An -N2 -tu2 /dev/urandom | tr -d ' ' | tr -d '\n' 2>/dev/null || echo $RANDOM)
     local logname="$LOG_DIR/woc_client_${client}_$ts_${rand}.log"
-    remote_exec "$client" "nohup '$REMOTE_DIR/$BINARY' -id=-1 -conf='$CONFIG_PATH' -role=1 -et=1 -mongodb ${extra_args} > '$logname' 2>&1 &"
+    remote_exec "$client" "nohup '$REMOTE_DIR/$BINARY' -id=-1 -path='$CONFIG_PATH' -role=1 -et=1 -mload=a ${extra_args} > '$logname' 2>&1 &"
 }
 
 run_ycsb_on_client() {
@@ -126,13 +126,13 @@ start_workload_nodes() {
     echo "  Starting WOC servers (workload=${workload}, indep=${indep}, common=${common})"
     for i in "${!SERVER_IPS[@]}"; do
         ip="${SERVER_IPS[$i]}"
-        remote_exec "$ip" "pkill -f 'woc.*-conf' 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=$i -conf='$CONFIG_PATH' -role=0 -et=1 -mongodb -workload=${workload} -indep_ratio=${indep} -common_ratio=${common} > '$LOG_DIR/server_${i}_indep_${indep}_common_${common}_$(date +%s).log' 2>&1 &"
+        remote_exec "$ip" "pkill -f 'woc.*-path' 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=$i -path='$CONFIG_PATH' -role=0 -et=1 -n=${#SERVER_IPS[@]} -t=${THRESHOLD:-1} -mcli=${#CLIENT_HOST_IPS[@]} -mload=${workload} -indep_ratio=${indep} -common_ratio=${common} > '$LOG_DIR/server_${i}_indep_${indep}_common_${common}_$(date +%s).log' 2>&1 &"
     done
 
     echo "  Starting WOC clients"
     for i in "${!CLIENT_HOST_IPS[@]}"; do
         ip="${CLIENT_HOST_IPS[$i]}"
-        remote_exec "$ip" "pkill -f 'woc.*-conf' 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=-1 -conf='$CONFIG_PATH' -role=1 -et=1 -mongodb -workload=${workload} -indep_ratio=${indep} -common_ratio=${common} > '$LOG_DIR/client_${i}_indep_${indep}_common_${common}_$(date +%s).log' 2>&1 &"
+        remote_exec "$ip" "pkill -f 'woc.*-path' 2>/dev/null || true; nohup '$REMOTE_DIR/$BINARY' -id=-1 -path='$CONFIG_PATH' -role=1 -et=1 -n=${#SERVER_IPS[@]} -t=${THRESHOLD:-1} -mload=${workload} -indep_ratio=${indep} -common_ratio=${common} > '$LOG_DIR/client_${i}_indep_${indep}_common_${common}_$(date +%s).log' 2>&1 &"
     done
 }
 

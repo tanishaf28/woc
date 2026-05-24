@@ -297,6 +297,10 @@ def merge_server_csvs(
     fast_latencies: list[float] = []
     slow_latencies: list[float] = []
     total_fallbacks = 0
+    summary_avg_latencies: list[float] = []
+    summary_p50_latencies: list[float] = []
+    summary_p95_latencies: list[float] = []
+    summary_p99_latencies: list[float] = []
 
     server_dirs_all = [
         d
@@ -351,10 +355,29 @@ def merge_server_csvs(
                     pass
 
                 # Summary rows - extract metrics from server CSV format
+                if label == "AVERAGE":
+                    avg_lat = _parse_float(_cell(row, 1))
+                    if avg_lat is not None:
+                        summary_avg_latencies.append(avg_lat)
+                    tpt = _parse_float(_cell(row, 2))
+                    if tpt is not None:
+                        all_throughputs.append(tpt)
                 if label == "THROUGHPUT":
                     tpt = _parse_float(_cell(row, 2))
                     if tpt is not None:
                         all_throughputs.append(tpt)
+                elif label == "P50_LATENCY":
+                    lat = _parse_float(_cell(row, 1))
+                    if lat is not None:
+                        summary_p50_latencies.append(lat)
+                elif label == "P95_LATENCY":
+                    lat = _parse_float(_cell(row, 1))
+                    if lat is not None:
+                        summary_p95_latencies.append(lat)
+                elif label == "P99_LATENCY":
+                    lat = _parse_float(_cell(row, 1))
+                    if lat is not None:
+                        summary_p99_latencies.append(lat)
                 elif label == "AVG_FAST_PATH_LATENCY":
                     lat = _parse_float(_cell(row, 1))
                     count = _parse_int(_cell(row, 3))
@@ -386,20 +409,26 @@ def merge_server_csvs(
                     if val is not None:
                         total_fallbacks += val
 
-    if not all_latencies:
-        raise RuntimeError("No latency data found in server CSV files")
-
     output_path = _resolve_output(eval_dir, output, "servers")
     out_dir = os.path.dirname(output_path)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
-    all_latencies.sort()
-    n = len(all_latencies)
-    p50 = all_latencies[n * 50 // 100]
-    p95 = all_latencies[n * 95 // 100]
-    p99 = all_latencies[n * 99 // 100]
-    avg_lat = sum(all_latencies) / n
+    if all_latencies:
+        all_latencies.sort()
+        n = len(all_latencies)
+        p50 = all_latencies[n * 50 // 100]
+        p95 = all_latencies[n * 95 // 100]
+        p99 = all_latencies[n * 99 // 100]
+        avg_lat = sum(all_latencies) / n
+    elif summary_avg_latencies:
+        avg_lat = sum(summary_avg_latencies) / len(summary_avg_latencies)
+        p50 = sum(summary_p50_latencies) / len(summary_p50_latencies) if summary_p50_latencies else avg_lat
+        p95 = sum(summary_p95_latencies) / len(summary_p95_latencies) if summary_p95_latencies else p50
+        p99 = sum(summary_p99_latencies) / len(summary_p99_latencies) if summary_p99_latencies else p95
+        print("  WARNING: No per-batch latency rows found; using summary latency rows from server CSVs")
+    else:
+        raise RuntimeError("No latency data found in server CSV files")
 
     # Sum per-server wall-clock throughput values into aggregate throughput.
     total_tpt = sum(all_throughputs)

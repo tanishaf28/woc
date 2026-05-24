@@ -120,9 +120,12 @@ func conJobPlainMsg(args *Args, reply *Reply) error {
 	// ===== FOLLOWER HANDLING =====
 	if !isLeader {
 		followerStart := time.Now()
-		if latencyDebug {
-			log.Debugf("[LATENCY] Follower handling request | ClientClock=%d | ObjType=%d",
-				args.ClientClock, args.ObjType)
+		if args.IsMixed && len(args.ObjIDs) > 0 && len(args.ObjTypes) > 0 {
+			// Mixed batches currently execute against the first object in the batch.
+			// Keep the real object ID so the fast path uses a pre-warmed object instead
+			// of a synthetic batch key that does not exist in ServerState.
+			args.ObjID = args.ObjIDs[0]
+			args.ObjType = args.ObjTypes[0]
 		}
 
 		if args.ObjType == IndependentObject {
@@ -134,43 +137,43 @@ func conJobPlainMsg(args *Args, reply *Reply) error {
 				ObjType:     args.ObjType,
 				CmdType:     args.CmdType,
 				Payload:     args.CmdPlain,
-				ForwardedBy: -1, 
+				ForwardedBy: -1,
 			}
-			
+
 			ok, pathUsed := cm.HandleCommand(cmd)
 			followerLatency := time.Since(followerStart)
-			
+
 			if latencyDebug {
 				log.Debugf("[LATENCY-BREAKDOWN] Follower fast-path coordination | ClientClock=%d | Path=%s | Latency=%vms",
 					args.ClientClock, pathUsed, followerLatency.Milliseconds())
 			}
-			
+
 			reply.Success = ok
 			reply.PathUsed = pathUsed
 			reply.Accepted = ok
 			reply.LeaderClock = 0 // Fast path doesn't use leader clock
 			reply.ExeResult = time.Since(start).String()
-			
+
 			if !ok {
 				reply.ErrorMsg = fmt.Errorf("fast path consensus failed")
 			}
 			return reply.ErrorMsg
-		} else {
-			ok, pathUsed := cm.forwardToLeaderOptimized(args, reply)
-			followerLatency := time.Since(followerStart)
-			
-			if latencyDebug {
-				log.Debugf("[LATENCY-BREAKDOWN] Follower forward-to-leader | ClientClock=%d | Path=%s | Latency=%vms",
-					args.ClientClock, pathUsed, followerLatency.Milliseconds())
-			}
-			
-			reply.ExeResult = time.Since(start).String()
-			
-			if !ok {
-				reply.ErrorMsg = fmt.Errorf("forward to leader failed")
-			}
-			return reply.ErrorMsg
 		}
+
+		ok, pathUsed := cm.forwardToLeaderOptimized(args, reply)
+		followerLatency := time.Since(followerStart)
+
+		if latencyDebug {
+			log.Debugf("[LATENCY-BREAKDOWN] Follower forward-to-leader | ClientClock=%d | Path=%s | Latency=%vms",
+				args.ClientClock, pathUsed, followerLatency.Milliseconds())
+		}
+
+		reply.ExeResult = time.Since(start).String()
+
+		if !ok {
+			reply.ErrorMsg = fmt.Errorf("forward to leader failed")
+		}
+		return reply.ErrorMsg
 	}
 
 	// ===== LEADER PROCESSING =====
@@ -225,12 +228,14 @@ func conJobPlainMsg(args *Args, reply *Reply) error {
 		ForwardedBy: args.ForwardedBy, 
 	}
 
-	if args.IsMixed {
-		cmd.ObjID = fmt.Sprintf("batch-%d-%d", args.ClientID, args.ClientClock)
+	if args.IsMixed && len(args.ObjIDs) > 0 && len(args.ObjTypes) > 0 {
+		// Mixed batches currently execute against the first object in the batch.
+		// Keep the real object ID so the fast path uses a pre-warmed object instead
+		// of a synthetic batch key that does not exist in ServerState.
+		cmd.ObjID = args.ObjIDs[0]
+		cmd.ObjType = args.ObjTypes[0]
 		if needsSlowPath {
 			cmd.ObjType = CommonObject
-		} else {
-			cmd.ObjType = IndependentObject
 		}
 	}
 
@@ -278,20 +283,61 @@ func conJobPlainMsg(args *Args, reply *Reply) error {
 func conJobMongoDB(args *Args, reply *Reply) error {
 	start := time.Now()
 	isLeader := cm.mystate.IsLeader()
+	batchSize := len(args.CmdMongo)
+
+	fastCount, slowCount, hotCount := 0, 0, 0
+	if args.IsMixed {
+		for i := 0; i < batchSize && i < len(args.ObjTypes); i++ {
+			switch args.ObjTypes[i] {
+			case IndependentObject:
+				fastCount++
+			case CommonObject:
+				slowCount++
+			case HotObject:
+				hotCount++
+			}
+		}
+	} else {
+		switch args.ObjType {
+		case IndependentObject:
+			fastCount = batchSize
+		case CommonObject:
+			slowCount = batchSize
+		case HotObject:
+			hotCount = batchSize
+		}
+	}
+
+	needsSlowPath := (slowCount + hotCount) > 0
+	effectiveObjID := args.ObjID
+	effectiveObjType := args.ObjType
+	if args.IsMixed {
+		effectiveObjID = fmt.Sprintf("batch-%d-%d", args.ClientID, args.ClientClock)
+		if needsSlowPath {
+			effectiveObjType = CommonObject
+		} else {
+			effectiveObjType = IndependentObject
+		}
+	}
 
 	if args.PrioVal > 0 {
 		if latencyDebug {
 			log.Debugf("[LATENCY] Follower voting (MongoDB immediate response) | ClientClock=%d | PrioClock=%d | ObjID=%s",
 				args.ClientClock, args.PrioClock, args.ObjID)
 		}
-		
-		reply.PathUsed = "SLOW"
+
+		applyAsSlowPath := args.PrioClock > 0 && (effectiveObjType == CommonObject || effectiveObjType == HotObject)
+		if applyAsSlowPath {
+			reply.PathUsed = "SLOW"
+		} else {
+			reply.PathUsed = "FAST"
+		}
 		reply.LeaderClock = args.PrioClock
 		reply.Success = true
 		reply.Accepted = true
 		reply.ExeResult = time.Since(start).String()
 
-		if mongoDbFollower != nil && len(args.CmdMongo) > 0 {
+		if applyAsSlowPath && mongoDbFollower != nil && len(args.CmdMongo) > 0 {
 			queries := append([]mongodb.Query(nil), args.CmdMongo...)
 			go func(clientClock int, asyncQueries []mongodb.Query) {
 				if _, _, err := mongoDbFollower.FollowerAPI(asyncQueries); err != nil {
@@ -316,12 +362,12 @@ func conJobMongoDB(args *Args, reply *Reply) error {
 				args.ClientClock, args.ObjType)
 		}
 
-		if args.ObjType == IndependentObject {
+		if effectiveObjType == IndependentObject {
 			cmd := Command{
 				ClientID:    args.ClientID,
 				ClientClock: args.ClientClock,
-				ObjID:       args.ObjID,
-				ObjType:     args.ObjType,
+				ObjID:       effectiveObjID,
+				ObjType:     effectiveObjType,
 				CmdType:     args.CmdType,
 				Payload:     args.CmdMongo,
 				ForwardedBy: -1,
@@ -336,12 +382,12 @@ func conJobMongoDB(args *Args, reply *Reply) error {
 			reply.ExeResult = time.Since(start).String()
 			
 			if ok {
-				_, _, err := mongoDbFollower.FollowerAPI(args.CmdMongo)
-				if err != nil {
-					log.Errorf("MongoDB follower execution failed | err: %v", err)
-					reply.ErrorMsg = err
-					return err
-				}
+				queries := append([]mongodb.Query(nil), args.CmdMongo...)
+				go func(clientClock int, asyncQueries []mongodb.Query) {
+					if _, _, err := mongoDbFollower.FollowerAPI(asyncQueries); err != nil {
+						log.Errorf("MongoDB follower execution failed | ClientClock=%d | err: %v", clientClock, err)
+					}
+				}(args.ClientClock, queries)
 			}
 			
 			if !ok {
@@ -369,8 +415,8 @@ func conJobMongoDB(args *Args, reply *Reply) error {
 	cmd := Command{
 		ClientID:    args.ClientID,
 		ClientClock: args.ClientClock,
-		ObjID:       args.ObjID,
-		ObjType:     args.ObjType,
+		ObjID:       effectiveObjID,
+		ObjType:     effectiveObjType,
 		CmdType:     args.CmdType,
 		Payload:     args.CmdMongo,
 		ForwardedBy: args.ForwardedBy,
@@ -384,14 +430,22 @@ func conJobMongoDB(args *Args, reply *Reply) error {
 	if ok {
 		_, _, err := mongoDbFollower.FollowerAPI(args.CmdMongo)
 		if err != nil {
-			log.Errorf("MongoDB leader execution failed | err: %v", err)
+			log.Errorf("MongoDB leader execution failed | ClientClock=%d | err: %v", args.ClientClock, err)
 			reply.ErrorMsg = err
 			reply.ExeResult = time.Since(start).String()
 			return err
 		}
 	}
 
+	totalTime := time.Since(start)
+	reply.Latency = totalTime.Seconds() * 1000
 	reply.ExeResult = fmt.Sprintf("Total:%vms", time.Since(start).Milliseconds())
+
+	if args.IsMixed && (fastCount > 0 || slowCount > 0 || hotCount > 0) {
+		reply.PathUsed = fmt.Sprintf("MIXED(FAST:%d,SLOW:%d,HOT:%d)", fastCount, slowCount, hotCount)
+	} else if hotCount > 0 {
+		reply.PathUsed = fmt.Sprintf("HOT:%d", hotCount)
+	}
 
 	if !ok {
 		reply.ErrorMsg = fmt.Errorf("%s path MongoDB consensus failed", path)

@@ -35,7 +35,7 @@ MONGODB_REPLICA_SET="wocrs"
 # WOC PARAMETERS
 NUM_SERVERS=5
 NUM_CLIENTS=2
-THRESHOLD=2
+THRESHOLD=1
 OPS=0
 EVAL_TYPE=0
 BATCHSIZE=10
@@ -139,6 +139,34 @@ wait_for_mongo_ready() {
     return 1
 }
 
+wait_for_replica_set_ready() {
+        local attempt
+
+        for attempt in $(seq 1 60); do
+                if ssh -i $SSH_KEY $USER@${SERVER_IPS[0]} "mongosh --quiet --eval '
+try {
+    var status = rs.status();
+    var ready = status.members.every(function (m) {
+        return m.stateStr === \"PRIMARY\" || m.stateStr === \"SECONDARY\";
+    });
+    if (ready) {
+        quit(0);
+    }
+    quit(1);
+} catch (e) {
+    quit(1);
+}
+' >/dev/null 2>&1"; then
+                        echo "  ✓ Replica set is ready"
+                        return 0
+                fi
+                sleep 1
+        done
+
+        echo "  Warning: replica set never reached PRIMARY/SECONDARY readiness"
+        return 1
+}
+
 # Copy binaries and configs to all servers
 echo ""
 echo "=============================================="
@@ -203,6 +231,7 @@ mongosh --port $MONGODB_PORT --eval "rs.status()"
 EOF
 
 sleep 5
+wait_for_replica_set_ready || true
 
 # Start WOC servers
 echo ""
@@ -247,7 +276,7 @@ for i in "${!CLIENT_HOST_IPS[@]}"; do
     
     echo "  Starting client $i on $ip..."
     for j in $(seq 0 $((CLIENTS_PER_VM - 1))); do
-        client_id=$((i * CLIENTS_PER_VM + j))
+        client_id=$((NUM_SERVERS + i * CLIENTS_PER_VM + j))
         ssh -i "$SSH_KEY" "$USER@$ip" bash -s <<EOF &
 set -e
 cd $REMOTE_DIR

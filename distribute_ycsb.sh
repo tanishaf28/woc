@@ -1,6 +1,6 @@
 #!/bin/bash
 # ================================================================
-# Distribute YCSB workload data files to all server nodes.
+# Distribute YCSB workload data files to all WOC nodes.
 # Run this ONCE before starting the MongoDB cluster.
 #
 # Prerequisites:
@@ -17,7 +17,7 @@ SSH_KEY="/home/ubuntu/.ssh/tani.pem"
 USER="ubuntu"
 REMOTE_DIR="/home/ubuntu/woc"
 
-# All nodes that run WOC servers (need the data files for initMongoDB)
+# Server nodes need the data files for initMongoDB.
 SERVER_IPS=(
     "192.168.73.159"
     "192.168.73.84"
@@ -26,17 +26,31 @@ SERVER_IPS=(
     "192.168.73.194"
 )
 
+# Client nodes also need the run_workload*.dat files because RunClient reads
+# them directly at runtime.
+CLIENT_IPS=(
+    "192.168.73.218"
+    "192.168.73.219"
+)
+
 LOCAL_DATA_DIR="./ycsb/workData"
+LEGACY_DATA_DIR="./ycsb/scripts/workData"
 REMOTE_DATA_DIR="${REMOTE_DIR}/ycsb/workData"
 
 SSH_OPTS=(-i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no)
 
-# Verify local data files exist
-if [ ! -f "${LOCAL_DATA_DIR}/workload.dat" ]; then
-    echo "ERROR: ${LOCAL_DATA_DIR}/workload.dat not found."
+if [ -f "${LOCAL_DATA_DIR}/workload.dat" ]; then
+    SOURCE_DATA_DIR="${LOCAL_DATA_DIR}"
+elif [ -f "${LEGACY_DATA_DIR}/workload.dat" ]; then
+    SOURCE_DATA_DIR="${LEGACY_DATA_DIR}"
+else
+    echo "ERROR: no workload.dat found."
+    echo "Expected either ${LOCAL_DATA_DIR}/workload.dat or ${LEGACY_DATA_DIR}/workload.dat"
     echo "Run genData.sh first to generate workload files."
     exit 1
 fi
+
+LOCAL_DATA_DIR="${SOURCE_DATA_DIR}"
 
 echo "Checking for run workload files..."
 for w in a b c d e f; do
@@ -49,8 +63,10 @@ for w in a b c d e f; do
 done
 echo ""
 
-echo "Distributing to ${#SERVER_IPS[@]} server nodes..."
-for ip in "${SERVER_IPS[@]}"; do
+TARGET_IPS=("${SERVER_IPS[@]}" "${CLIENT_IPS[@]}")
+
+echo "Distributing to ${#TARGET_IPS[@]} WOC nodes..."
+for ip in "${TARGET_IPS[@]}"; do
     (
         echo "  → $ip: creating remote dir..."
         ssh "${SSH_OPTS[@]}" "$USER@$ip" "mkdir -p '$REMOTE_DATA_DIR'"
@@ -65,7 +81,7 @@ wait
 
 echo ""
 echo "Verifying on all nodes..."
-for ip in "${SERVER_IPS[@]}"; do
+for ip in "${TARGET_IPS[@]}"; do
     count=$(ssh "${SSH_OPTS[@]}" "$USER@$ip" \
         "ls '$REMOTE_DATA_DIR'/*.dat 2>/dev/null | wc -l" || echo 0)
     echo "  $ip: $count .dat files present"
@@ -74,7 +90,3 @@ done
 echo ""
 echo "✓ Distribution complete."
 echo ""
-echo "IMPORTANT: Only server 0 (192.168.73.159) should load data into MongoDB."
-echo "The replica set will replicate it automatically to servers 1-4."
-echo "The race condition in initMongoDB (all servers loading simultaneously)"
-echo "is harmless but wastes time — MongoDB replica replication handles it."

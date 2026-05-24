@@ -1,5 +1,5 @@
 #!/bin/bash
-# One-command runner for MongoDB workloads on heterogeneous cluster.
+# Backward-compatible wrapper for one-shot MongoDB workload mode.
 
 set -euo pipefail
 
@@ -14,13 +14,4 @@ if [[ ! "$WORKLOAD" =~ ^[a-f]$ ]]; then
     exit 1
 fi
 
-bash ./start_mongodb_hetero.sh "$WORKLOAD"
-
-if [ "$RUNTIME_SECONDS" -gt 0 ]; then
-    echo "Running workload '${WORKLOAD}' for ${RUNTIME_SECONDS}s..."
-    sleep "$RUNTIME_SECONDS"
-    echo "Stopping cluster after timed run..."
-    bash ./stop_mongodb_hetero.sh
-else
-    echo "Cluster is running workload '${WORKLOAD}'. Stop manually with: ./stop_mongodb_hetero.sh"
-fi
+bash ./run_all_evals.sh --workload "$WORKLOAD" "$RUNTIME_SECONDS"
