@@ -1,0 +1,9 @@
+system,size,experiment,filename,throughput,avg_latency,p50,p95,p99,conflict,fallbacks
+woc,5,indep_0.0,merged_woc_servers_20260805_215513.csv,778.6,2.833,2.7,5.1,6.2,0.0,0.0
+woc,5,indep_10.0,merged_woc_servers_20260805_215333.csv,853.4,2.853,2.6,5.2,6.4,0.0,1.0
+woc,5,indep_100.0,merged_woc_servers_20260805_214330.csv,16410.9,1.322,1.2,2.4,3.3,0.0,7.0
+woc,5,indep_20.0,merged_woc_servers_20260805_215154.csv,1003.7,2.369,2.1,4.8,6.2,0.0,2.0
+woc,5,indep_40.0,merged_woc_servers_20260805_215013.csv,1402.1,2.225,1.9,4.7,6.8,0.0,3.0
+woc,5,indep_60.0,merged_woc_servers_20260805_214834.csv,3305.0,5.503,1.8,20.5,24.5,0.0,0.0
+woc,5,indep_80.0,merged_woc_servers_20260805_214653.csv,7556.7,2.661,1.4,12.4,16.8,0.0,34.0
+woc,5,indep_90.0,merged_woc_servers_20260805_214513.csv,13804.8,1.443,1.2,2.8,5.5,0.0,15.0
