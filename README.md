@@ -400,13 +400,6 @@ done
 
 ---
 
-## Paper
-
-**CORA: Adaptive Object Weighted Consensus Made Efficient**   
-arXiv: [2512.20485](https://arxiv.org/abs/2512.20485)
-
----
-
 ## License
 MIT
 
