@@ -27,14 +27,6 @@ detection:
 builds the ring once at startup (`objectmap.go`) and disseminates ownership;
 only the owning replica coordinates that object's fast path.
 
-## Known limitations
-
-- **Ring reassignment on failure**: not yet implemented the ring is fixed
-  at startup and does not adapt if a replica goes down mid-run.
-- **`-readmode fast`**: an uncoordinated local-read mode with no quorum
-  confirmation. Not covered by the correctness proof. Use `-readmode safe`
-  (default) for results that match the correctness guarantees.
-
 ## Build
 
 ```bash
