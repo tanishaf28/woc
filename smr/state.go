@@ -13,10 +13,10 @@ import (
 // Tracks per-object metadata for WOC
 type ObjectState struct {
 	sync.RWMutex
-	ID          string
-	ObjType     int             // IndependentObject or DependentObject
-	RValue      float64         // Decay factor (1.0 < R < 2.0)
-	Weights     map[int]float64 // ReplicaID → weight
+	ID      string
+	ObjType int             // IndependentObject or DependentObject
+	RValue  float64         // Decay factor (1.0 < R < 2.0)
+	Weights map[int]float64 // ReplicaID → weight
 	// weightCache is published via atomic.Pointer rather than protected by
 	// the embedded RWMutex: the fast-path broadcast loop reads it once per
 	// round, per connection, without taking a lock (see consensus.go), and
@@ -28,10 +28,10 @@ type ObjectState struct {
 	// swap, so readers always see either the old or the new slice in full,
 	// never a torn one. Read it via GetWeightCache(); written via Store()
 	// inside GenerateWeights/ReassignWeights, both already under o.Lock().
-	weightCache atomic.Pointer[[]float64]
-	TotalWeight float64 // Sum of all replica weights
-	MaxWeight         float64         // Highest replica weight
-	ThresholdFast     float64         // Weighted quorum threshold (fast path)
+	weightCache       atomic.Pointer[[]float64]
+	TotalWeight       float64 // Sum of all replica weights
+	MaxWeight         float64 // Highest replica weight
+	ThresholdFast     float64 // Weighted quorum threshold (fast path)
 	LastCommittedOpID string
 	LastProposer      int
 	Value             interface{}
@@ -67,7 +67,7 @@ type ServerState struct {
 	term      int
 	votedFor  bool
 	logIndex  int
-	cmtIndex  int
+	cmtIndex  atomic.Int64
 	prioClock int
 	Objects   map[string]*ObjectState // ObjectID → ObjectState
 }
@@ -78,7 +78,6 @@ func NewServerState() *ServerState {
 		term:      0,
 		votedFor:  false,
 		logIndex:  0,
-		cmtIndex:  0,
 		prioClock: 0,
 		Objects:   make(map[string]*ObjectState),
 	}
@@ -157,19 +156,13 @@ func (s *ServerState) AddLogIndex(n int) {
 }
 
 func (s *ServerState) SyncCommitIndex(commitIndex int) {
-	s.Lock()
-	defer s.Unlock()
-	s.cmtIndex = commitIndex
+	s.cmtIndex.Store(int64(commitIndex))
 }
 func (s *ServerState) GetCommitIndex() int {
-	s.RLock()
-	defer s.RUnlock()
-	return s.cmtIndex
+	return int(s.cmtIndex.Load())
 }
 func (s *ServerState) AddCommitIndex(n int) {
-	s.Lock()
-	defer s.Unlock()
-	s.cmtIndex += n
+	s.cmtIndex.Add(int64(n))
 }
 
 func (s *ServerState) GetPrioClock() int {
@@ -200,26 +193,51 @@ func (s *ServerState) GenerateRValue(objType int, objID int, numReplicas int, qu
 	return r
 }
 
+// GetOrCreateObject returns objID's ObjectState, creating it on first touch
+// if this replica has never seen it before. AddObject already does its own
+// exists-check under lock, so calling it unconditionally here is safe and
+// idempotent - concurrent first-touches of the same new key just race
+// harmlessly to the same result.
+//
+// This is the single shared path for "get this object, creating it if
+// needed" - used by the fast-path leader (handleFastPath) and fast-path
+// followers (applyExecute) alike, so a follower voting on a real (e.g.
+// MongoDB/YCSB) key it has never independently seen creates it too, instead
+// of a plain GetObject/nil check silently auto-rejecting every first-touch
+// vote (only the leader used to know how to create objects on demand).
+func (s *ServerState) GetOrCreateObject(objID string, objType int, numReplicas int, quorumSize int, ratioTryStep float64) *ObjectState {
+	s.RLock()
+	obj, exists := s.Objects[objID]
+	s.RUnlock()
+	if exists {
+		return obj
+	}
+	s.AddObject(objID, objType, numReplicas, quorumSize, ratioTryStep)
+	s.RLock()
+	defer s.RUnlock()
+	return s.Objects[objID]
+}
+
 // In ServerState — add quorumSize parameter
 func (s *ServerState) AddObject(objID string, objType int, numReplicas int, quorumSize int, ratioTryStep float64) {
-    s.Lock()
-    defer s.Unlock()
-    if _, exists := s.Objects[objID]; exists {
-        return
-    }
+	s.Lock()
+	defer s.Unlock()
+	if _, exists := s.Objects[objID]; exists {
+		return
+	}
 
-    rValue := s.GenerateRValue(objType, len(s.Objects), numReplicas, quorumSize, ratioTryStep)
+	rValue := s.GenerateRValue(objType, len(s.Objects), numReplicas, quorumSize, ratioTryStep)
 
-    obj := &ObjectState{
-        ID:      objID,
-        ObjType: objType,
-        RValue:  rValue,
-        Weights: make(map[int]float64),
-    }
+	obj := &ObjectState{
+		ID:      objID,
+		ObjType: objType,
+		RValue:  rValue,
+		Weights: make(map[int]float64),
+	}
 
-    obj.GenerateWeights(numReplicas)
-    obj.ComputeFastThreshold(quorumSize)  // ← now passes t+1, not numReplicas
-    s.Objects[objID] = obj
+	obj.GenerateWeights(numReplicas)
+	obj.ComputeFastThreshold(quorumSize) // ← now passes t+1, not numReplicas
+	s.Objects[objID] = obj
 }
 
 func (o *ObjectState) GenerateWeights(numReplicas int) {
@@ -260,9 +278,9 @@ func (o *ObjectState) GetWeightCache() []float64 {
 // at all - see ComputeFastThresholdExcluding for the case where some of
 // that weight belongs to a now-dead replica.
 func (o *ObjectState) ComputeFastThreshold(quorumSize int) {
-    o.Lock()
-    defer o.Unlock()
-    o.ThresholdFast = o.TotalWeight / 2
+	o.Lock()
+	defer o.Unlock()
+	o.ThresholdFast = o.TotalWeight / 2
 }
 
 // ComputeFastThresholdExcluding recomputes the threshold as half the sum of
@@ -273,17 +291,17 @@ func (o *ObjectState) ComputeFastThreshold(quorumSize int) {
 // object even though enough live replicas remain to satisfy Lemma 4's
 // liveness argument.
 func (o *ObjectState) ComputeFastThresholdExcluding(quorumSize int, dead map[int]bool) {
-    o.Lock()
-    defer o.Unlock()
+	o.Lock()
+	defer o.Unlock()
 
-    liveTotal := 0.0
-    for id, w := range o.Weights {
-        if dead[id] {
-            continue
-        }
-        liveTotal += w
-    }
-    o.ThresholdFast = liveTotal / 2
+	liveTotal := 0.0
+	for id, w := range o.Weights {
+		if dead[id] {
+			continue
+		}
+		liveTotal += w
+	}
+	o.ThresholdFast = liveTotal / 2
 }
 
 // RecomputeFastThresholds recalculates every known object's fast-path quorum
@@ -304,17 +322,31 @@ func (s *ServerState) RecomputeFastThresholds(quorumSize int, dead map[int]bool)
 }
 
 // ---------------- Object Commit ----------------
+// UpdateObjectCommit takes only a read lock on ServerState to find the
+// object, then relies on ObjectState's own per-object lock for the field
+// writes - exactly the pattern GetObject + obj.Lock() already uses
+// elsewhere (see the SLOW-path metadata stamp in consensus.go). This lets
+// commits to different objects proceed fully in parallel on the fast path,
+// where each object has its own owning coordinator. It does not affect
+// slow-path ordering: startSlowPathProcessor is a single-consumer loop that
+// already serializes every dependent-object commit before this is ever
+// called, so at most one slow-path UpdateObjectCommit is in flight at a
+// time regardless of this lock's granularity. The map itself stays safe
+// under concurrent RLock reads because AddObject/RegisterObject/DeleteObject
+// are the only writers and all take the exclusive s.Lock().
 func (s *ServerState) UpdateObjectCommit(objID string, proposer int, value interface{}, pathUsed string) {
-	s.Lock()
-	defer s.Unlock()
-	if obj, ok := s.Objects[objID]; ok {
-		obj.Lock()
-		defer obj.Unlock()
-		obj.LastProposer = proposer
-		obj.Value = value
-		obj.LastCommitType = pathUsed
-		obj.LastCommitTime = time.Now()
+	s.RLock()
+	obj, ok := s.Objects[objID]
+	s.RUnlock()
+	if !ok {
+		return
 	}
+	obj.Lock()
+	defer obj.Unlock()
+	obj.LastProposer = proposer
+	obj.Value = value
+	obj.LastCommitType = pathUsed
+	obj.LastCommitTime = time.Now()
 }
 
 // ---------------- Fast-Path Provisional Apply / Fallback ----------------

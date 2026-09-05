@@ -1,7 +1,0 @@
-system,size,experiment,filename,throughput,avg_latency,p50,p95,p99,conflict,fallbacks
-woc,5,n5_woc_mongo_workload_a,merged_woc_clients_20260807_204304.csv,2132.6,11.624,8.6,22.8,27.2,0.0,0.0
-woc,5,n5_woc_mongo_workload_b,merged_woc_clients_20260807_204608.csv,2035.8,12.192,13.3,21.4,24.7,0.0,0.0
-woc,5,n5_woc_mongo_workload_c,merged_woc_clients_20260807_204917.csv,2040.3,12.157,13.2,21.3,24.5,0.0,0.0
-woc,5,n5_woc_mongo_workload_d,merged_woc_clients_20260807_205223.csv,3368.5,7.388,5.0,19.5,28.3,90516.0,0.0
-woc,5,n5_woc_mongo_workload_e,merged_woc_clients_20260807_205534.csv,3285.6,7.591,5.3,19.9,28.5,91065.0,0.0
-woc,5,n5_woc_mongo_workload_f,merged_woc_clients_20260807_205839.csv,1973.9,12.574,13.5,22.9,26.3,0.0,0.0

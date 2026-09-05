@@ -3,26 +3,31 @@
 # WOC Local Cluster Parameters (Synced with start_cluster.sh)
 ###############################################################
 
-NUM_SERVERS=5                # Number of servers
-NUM_CLIENTS=2               # Number of clients (increased for parallelism)
-OPS=0                       # Operations per client (0 for infinite mode)
-THRESHOLD=1                  # Quorum threshold (f = threshold + 1)
-EVAL_TYPE=0                  # 0=plain msg, 1=mongodb
-BATCHSIZE=1                  # Batch size
-MSG_SIZE=512                 # Message size for plain msg
-MODE=0                       # 0=localhost, 1=distributed
-INDEP_RATIO=00.0             # % independent objects (fast path)
-NUM_OBJECTS=1000             # size of the fixed, hash-ring-mapped object pool
-BATCH_COMPOSITION="object-specific" # "mixed" or "object-specific"
-PIPELINE_MODE="true"         # "true"=pipeline, "false"=sequential
-MAX_INFLIGHT=3               # Adaptive limiter: starts at 2, auto-adjusts up to 3
-CONFIG_PATH="./config/cluster_localhost.conf"
-LOG_DIR="./logs"
-BINARY="./woc"
-LOG_LEVEL="info"             # "info" for production, "debug" for verbose logs
-ENABLE_PRIORITY="true"       # "true"=cabinet, "false"=raft
-LATENCY_DEBUG="false"        # "true"=Cabinet-style latency breakdown (fast/slow/forward)
-SERVER_BATCHING="false"       # Batch requests before consensus
+# Every value below can be overridden by exporting (or prefixing) the same
+# name, e.g. `INDEP_RATIO=50 BATCHSIZE=100 ./run_woc.sh` — see README.md's
+# "Reproduce paper experiments" section for the sweeps this enables.
+NUM_SERVERS="${NUM_SERVERS:-5}"                # Number of servers
+NUM_CLIENTS="${NUM_CLIENTS:-2}"                # Number of clients (increased for parallelism)
+OPS="${OPS:-0}"                                # Operations per client (0 for infinite mode)
+THRESHOLD="${THRESHOLD:-1}"                    # Quorum threshold (f = threshold + 1)
+EVAL_TYPE="${EVAL_TYPE:-0}"                    # 0=plain msg, 1=mongodb
+BATCHSIZE="${BATCHSIZE:-1}"                    # Batch size
+MSG_SIZE="${MSG_SIZE:-512}"                    # Message size for plain msg
+MODE="${MODE:-0}"                              # 0=localhost, 1=distributed
+INDEP_RATIO="${INDEP_RATIO:-00.0}"             # % independent objects (fast path)
+NUM_OBJECTS="${NUM_OBJECTS:-1000}"             # size of the fixed, hash-ring-mapped object pool
+BATCH_COMPOSITION="${BATCH_COMPOSITION:-object-specific}" # "mixed" or "object-specific"
+READ_RATIO="${READ_RATIO:-0}"                  # % of ops that are reads (0 = all writes)
+READ_MODE="${READ_MODE:-fast}"                 # "fast" (no quorum) or "safe" (weighted quorum confirmation)
+PIPELINE_MODE="${PIPELINE_MODE:-true}"         # "true"=pipeline, "false"=sequential
+MAX_INFLIGHT="${MAX_INFLIGHT:-3}"              # Adaptive limiter: starts at 2, auto-adjusts up to this
+CONFIG_PATH="${CONFIG_PATH:-./config/cluster_localhost.conf}"
+LOG_DIR="${LOG_DIR:-./logs}"
+BINARY="${BINARY:-./woc}"
+LOG_LEVEL="${LOG_LEVEL:-info}"                 # "info" for production, "debug" for verbose logs
+ENABLE_PRIORITY="${ENABLE_PRIORITY:-true}"     # "true"=cabinet, "false"=raft
+LATENCY_DEBUG="${LATENCY_DEBUG:-false}"        # "true"=Cabinet-style latency breakdown (fast/slow/forward)
+SERVER_BATCHING="${SERVER_BATCHING:-false}"    # Batch requests before consensus
 
 # Track PIDs
 declare -a SERVER_PIDS=()
@@ -127,6 +132,8 @@ for ((i=0; i<NUM_CLIENTS; i++)); do
         -indep=${INDEP_RATIO} \
         -numobjects=${NUM_OBJECTS} \
         -bcomp="${BATCH_COMPOSITION}" \
+        -readratio=${READ_RATIO} \
+        -readmode="${READ_MODE}" \
         -ms=${MSG_SIZE} \
         -mode=${MODE} \
         -pinserver=${pin_server} \
@@ -179,11 +186,7 @@ else
 fi
 echo ""
 echo "Adaptive Concurrency Control:"
-if [ "${NO_LIMITER}" = "true" ]; then
-    echo "  Limiter:       NONE (zero overhead) - LOCALHOST ONLY ⚡"
-    echo "  ⚠️  WARNING: Only use NO_LIMITER for localhost testing!"
-    echo "  Concurrency:   UNLIMITED (no backpressure control)"
-elif [ "${USE_SIMPLE_LIMITER}" = "true" ]; then
+if [ "${USE_SIMPLE_LIMITER}" = "true" ]; then
     echo "  Limiter:       SIMPLE (lock-free semaphore) - OPTIMIZED ✓"
     echo "  Fixed limit:   ${MAX_INFLIGHT} concurrent batches per client"
 else
@@ -206,10 +209,7 @@ else
 fi
 echo ""
 echo "Optimizations:"
-if [ "${NO_LIMITER}" = "true" ]; then
-    echo "  ⚡ NoOpLimiter enabled (ZERO overhead - localhost only!)"
-    echo "     → Matches Cabinet latency (~0.6-1.0ms)"
-elif [ "${USE_SIMPLE_LIMITER}" = "true" ]; then
+if [ "${USE_SIMPLE_LIMITER}" = "true" ]; then
     echo "  ✓ SimpleLimiter enabled (300-600μs savings per request)"
     echo "     → Lock-free channel, ~1.2-1.8ms latency"
 else

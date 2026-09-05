@@ -53,7 +53,7 @@ func dbRead(db *mongo.Database, table string, key string,
 	if key == "" {
 		log.Debugf("Find all in table: %s", coll.Name())
 	} else {
-		filter = bson.D{{"_id", key}}
+		filter = bson.D{{Key: "_id", Value: key}}
 	}
 
 	cursor, err := coll.Find(context.TODO(), filter)
@@ -82,8 +82,8 @@ func dbScan(db *mongo.Database, table string, startkey string, recordcount int,
 	fields map[string]string) (results []map[string]string, err error) {
 
 	coll := db.Collection(table)
-	filter := bson.D{{"_id", bson.D{{"$gte", startkey}}}}
-	sort := bson.D{{"_id", 1}}
+	filter := bson.D{{Key: "_id", Value: bson.D{{Key: "$gte", Value: startkey}}}}
+	sort := bson.D{{Key: "_id", Value: 1}}
 
 	cursor, err := coll.Find(
 		context.TODO(),

@@ -53,9 +53,11 @@ CLUSTER_ACTIVE=false
 RUNTIME_SECONDS="${RUNTIME_SECONDS:-60}"
 CRASH_TRIGGER_SECONDS="${CRASH_TRIGGER_SECONDS:-10}"
 
+NUM_CLIENTS="${NUM_CLIENTS:-5}"
+
 BASE_ENV=(
     "NUM_SERVERS=5"
-    "NUM_CLIENTS=5"
+    "NUM_CLIENTS=${NUM_CLIENTS}"
     "THRESHOLD=2"
     "BATCHSIZE=${BATCHSIZE_OVERRIDE}"
     "MSG_SIZE=512"
@@ -70,26 +72,28 @@ BASE_ENV=(
 SERVER_IPS=(
     "192.168.73.59"
     "192.168.73.243"
-    "192.168.73.192"
-    "192.168.73.134"
-    "192.168.73.132"
+    "192.168.73.27"
+    "192.168.73.157"
+    "192.168.73.78"
 )
 
-# Same 5-host slice used by epaxos/cabinet/raft's crash scripts, so all
-# four protocols' crash evals run on identical client VMs.
-CLIENT_IPS=(
+# Same 5-host pool used by epaxos/cabinet/raft's crash scripts, sliced to
+# NUM_CLIENTS so all four protocols' crash evals run on identical client
+# VMs under an identical client count.
+ALL_CLIENT_IPS=(
     "192.168.73.159"
     "192.168.73.84"
     "192.168.73.218"
     "192.168.73.219"
     "192.168.73.25"
 )
+CLIENT_IPS=("${ALL_CLIENT_IPS[@]:0:NUM_CLIENTS}")
 
 mkdir -p "$RUN_DIR"
 touch "$touch_marker"
 
 stop_plain_cluster() {
-    bash "$STOP_SCRIPT"
+    SERVER_COUNT=5 CLIENT_COUNT="${NUM_CLIENTS}" bash "$STOP_SCRIPT"
 }
 
 archive_latest_result() {

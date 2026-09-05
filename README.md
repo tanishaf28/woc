@@ -1,44 +1,42 @@
-# CORA : Object-Weighted Dual-Path Consensus
+# CORA: Adaptive Object-Weighted Consensus Made Efficient
 
-> **C**onsensus with **O**bject-level **R**outing **A**daptation  
-> A hybrid consensus protocol for mixed-workload cloud systems.
+> A dual-path consensus protocol that jointly exploits **weighted quorums**
+> and **object-level concurrency** through adaptive request routing.
+>
+> **Correctness report:** full safety/liveness proofs are in
+> [`CORA_extended_correctness_report.pdf`](CORA_extended_correctness_report.pdf)
+> at the repo root. This README covers the implementation only.
 
 ```
-Fast path  →  leaderless, one RTT, per-object weighted quorum
-Slow path  →  leader-coordinated, priority-weighted, FIFO ordered
+Fast path  →  leaderless, one RTT, per-object weighted quorum   (independent objects)
+Slow path  →  leader-coordinated, node-weighted, FIFO ordered   (dependent objects)
 ```
 
 ---
 
-## What is CORA?
+## How It Works
 
-Most real-world cloud workloads are **multi-tenant**: the vast majority of operations touch private, per-user data that no other client ever writes. Yet classical consensus protocols  Paxos, Raft, serialize *every* operation through a single leader, wasting throughput proportional to how independent the workload actually is.
-CORA takes a different approach. Instead of detecting conflicts at runtime (EPaxos) or serializing everything (Raft/Cabinet), CORA routes operations based on a **declared access pattern** made at object initialization:
+Classical consensus (Paxos, Raft) and weighted-quorum protocols (Cabinet)
+serialize *every* operation through one global order, even though most
+workloads are dominated by operations on data no other client ever touches.
+CORA routes each transaction by a **declared, per-object access pattern**:
 
-| Object type | Who writes it | Path taken |
-|---|---|---|
-| `Independent` | Single writer only | Fast path: leaderless, 1 RTT |
-| `Dependent` | Multiple writers | Slow path:  leader-coordinated |
+| Object type | Writer cardinality | Path | Coordinator |
+|---|---|---|---|
+| `Independent` | single writer | **Fast path**: leaderless, 1 RTT, per-object weighted quorum | the object's owner (assigned via a hash ring) |
+| `Dependent` | multiple writers | **Slow path**: leader-coordinated, node-weighted, FIFO | the cluster leader |
 
-The routing decision is a single hash lookup. Zero runtime conflict detection.
-A fixed pool of objects (`-numobjects`, default 1000) is split into
-independent/dependent by `-indep`. The global leader builds a single
-consistent-hash ring over all objects (`objectmap.go`) and disseminates the
-resulting ownership mapping to every replica at startup
-(`WocService.GetObjectOwnership`) — only the owner coordinates that
-object's fast path; other replicas forward to it. Ring updates on replica
-failure are not yet implemented (the ring is fixed once at startup).
-
----
-
-## Architecture
+Routing costs one hash lookup, no runtime conflict detection, no dependency
+graph. A transaction touching **more than one object is always dependent**,
+even if every object is individually independent, since atomically
+committing across objects needs the ordering only the slow path provides
+(`client.go`'s `multi_obj` composition, `consensus.go`'s `MultiObject` flag).
 
 ```
 Client Request
       │
       ▼
- Object Registry
- (type lookup)
+ Object Registry (objectmap.go)
       │
   ┌───┴────────────────────┐
   │                        │
@@ -46,68 +44,69 @@ Client Request
 FAST PATH              SLOW PATH
 (Independent)          (Dependent)
   │                        │
-  │  Owning replica        │  Forwarded to leader
-  │  (hash ring) becomes   │  → FIFO queue
-  │  coordinator           │  → Priority-weighted
-  │  Per-object weighted   │    voting
-  │  quorum (≥ T_O)        │
-  │                        │
+  │ Owning replica (hash   │ Forwarded to leader
+  │ ring) becomes          │  → single FIFO queue
+  │ coordinator; per-object│  → node-weighted
+  │ weighted quorum        │    quorum vote
   └────────────┬───────────┘
                │
-          State Machine
-           (all replicas)
+     State Machine (applied by every
+      voting replica, not just the
+         coordinator/leader)
 ```
 
-**Fast path** runs in parallel across all independent objects simultaneously. Multiple coordinators, no leader involvement, one network round-trip.
+Both paths share one pattern: a coordinator seeds an accumulator with its
+own weight, broadcasts a proposal, and commits once collected replies cross
+half the domain's total weight object weights on the fast path, the
+global replica-weight vector on the slow path.
 
-**Slow path** handles only the operations that genuinely need ordering. The leader's queue establishes total order; a priority-weighted reputation mechanism concentrates decisions in the fastest-responding nodes.
+**Key properties:**
 
----
+- **Per-object linearizability** : a per-object write lock plus a monotonic
+  sequence guard (`ObjectState.ApplyFastProvisional`) keep at most one
+  fast-path round outstanding per object.
+- **Path disjointness** : an object's type is fixed at creation; independent
+  and dependent objects share no coordination state.
+- **Leaderless fast path** : leader failure doesn't affect independent
+  object availability; fast-path coordinators are assigned purely by
+  consistent hashing.
+- **Dynamic fault tolerance** : the leader's health monitor detects failures
+  and reassigns the ownership ring through the same slow-path consensus
+  round as any dependent write, so every replica adopts it at the same
+  global order position (`startReplicaHealthMonitor`, `RingUpdate`).
+- **Per-object fault-tolerance tuning** : `-hotobjthreshold`/`-hotobjid` let
+  one object run a different failure threshold `t` than the rest of the run.
+- **Adaptive liveness** : an RFC 6298-style (SRTT/RTTVAR) timeout bounds the
+  fast-path quorum wait before falling back to the slow path.
 
-## Key Properties
-
-- **Per-object linearizability** — all operations on any single object appear atomic in real-time order
-- **No cross-path conflict** — Independent and Dependent objects are disjoint; paths never interfere
-- **Graceful degradation** — at 100% Dependent workload, CORA converges with Cabinet (no overhead added)
-- **Leaderless fast path** — leader failure does not affect Independent object availability
-- **Liveness under partial synchrony** — timeout-bounded fallback from fast path to slow path
-
----
-
-## Reads
-
-Every committed object can be read in two modes (`-readratio`, `-readmode`):
-
-- **Fast read** — whichever replica receives the request answers from its
-  own local state immediately. Zero coordination, lowest latency,
-  speculative (no freshness guarantee).
-- **Safe read** — gathers Value from a quorum of replicas (the same
-  per-object weight threshold independent-object writes use, or the global
-  threshold for dependent objects, routed through the leader like dependent
-  writes) and returns the value from whichever responding replica carries
-  the highest weight. Under Cabinet's weight reassignment the highest-weight
-  responder is the most recent fast responder — the last proposer by
-  definition — so its value is the freshest available without a per-object
-  version vector.
-
-Reads only return meaningful values because every replica that votes in a
-fast/slow-path round now actually applies the command locally (not just the
-coordinator/leader) — see `Execute` in `service.go`/`consensus.go`.
+**Reads** (`-readratio`, `-readmode`): **fast** answers from whichever
+replica got the request, no coordination, independent objects only. **safe**
+gathers a weighted quorum and returns the value held by the
+highest-weight responder under the weight-reassignment rule, that's
+always the most recent proposer, so it's the freshest value available
+without a per-object version vector (`quorumRead`, `consensus.go`).
 
 ---
 
-## Performance
+## Implementation Map
 
-Evaluated on a 5-node cluster (Compute Canada Cloud, 4 vCPU / 8 GB / 10 Gbps), 95% independent / 5% dependent workload:
+| Paper concept | Implementation |
+|---|---|
+| Independent/dependent classification, static type / dynamic per-tx routing | `objectmap.go`: `InitObjectRegistry`, `classifyRealKey` |
+| A transaction spanning >1 object is dependent even if every object is independent | `client.go`'s `multi_obj` composition, `consensus.go`'s `MultiObject` flag |
+| Consistent-hash ring ownership, computed by the leader and disseminated | `objectmap.go`: `HashRing`, `BuildOwnershipRing`, `AssignOwnership`; `main.go`: `fetchOwnershipFromLeader` |
+| Dynamic ring reconfiguration on replica failure, via slow-path consensus | `consensus.go`: `startReplicaHealthMonitor`; `objectmap.go`: `RingUpdate`/`applyRingUpdate` |
+| Per-object weight matrix, geometric weight vector, configurable per-object `t` | `smr/state.go`: `GenerateWeights`; `smr/pmgr.go`: `calcInitPrioRatio` |
+| Fast-path quorum threshold = half the object's total weight | `smr/state.go`: `ComputeFastThreshold` / `ComputeFastThresholdExcluding` |
+| Fast-path pattern: seed, broadcast, accumulate, commit, reassign, fallback | `consensus.go`: `handleFastPath` |
+| "The vote is the apply"  a follower applies on accept, revertible on fallback | `smr/state.go`: `ApplyFastProvisional` / `RevertIfSeqMatches`; `consensus.go`: `broadcastFallBack` |
+| Weight reassignment: coordinator keeps top weight, responders next by arrival order | `smr/state.go`: `ObjectState.ReassignWeights` |
+| Slow path: single serialized leader queue, global weight vector | `consensus.go`: `startSlowPathProcessor`; `smr/pmgr.go`: `PriorityManager` |
+| Auto load balancing from independent per-object weight rankings | falls out of each object's independently generated weight vector |
+| Fast read (local) vs. safe read (weighted quorum, freshest-by-weight) | `consensus.go`: `handleRead` / `quorumRead` |
 
-| Scenario | CORA | Cabinet | Speedup |
-|---|---|---|---|
-| Baseline (batch=1, pipe=1) | ~8 kTx/s | ~1.5 kTx/s | **5–6×** |
-| Pipelined (MAX\_INFLIGHT=50, n=3) | 24.7 kTx/s | 1.38 kTx/s | **18×** |
-| 100% Dependent | ~1.0 kTx/s | ~1.4 kTx/s | converges |
-| Large batch (2000 ops/RPC) | 248 kTx/s | 149 kTx/s | **1.67×** |
-
-Median latency at 95% independent: **< 1 ms**.
+See the correctness report for the full safety/liveness proof and where the
+implementation's guarantees are established.
 
 ---
 
@@ -115,51 +114,47 @@ Median latency at 95% independent: **< 1 ms**.
 
 ```
 woc/
-├── main.go                   # Entry point, flag parsing, pre-warms the 1000-object pool
-├── objectmap.go              # Hash ring + object registry: object mapping (paper §4.2)
-├── parameters.go             # Global config: IndependentObject, DependentObject constants
-├── client.go                 # Client driver — pipelined/sequential modes, limiter variants
-├── consensus.go              # Core protocol — fast path, slow path, weight vectors, timeouts
-├── service.go                # RPC handlers — ConsensusService, RequestVote, Ping
-├── conns.go                  # Connection management, per-connection FIFO ordering
-├── utils.go                  # Metrics, logging helpers
+├── main.go              # Entry point, flag parsing, object-pool pre-warm, ownership bootstrap
+├── objectmap.go          # Hash ring + object registry: object mapping
+├── parameters.go          # All CLI flags and global run parameters
+├── client.go              # Client driver: sequential/pipelined dispatch, limiters, batch composition
+├── consensus.go            # Core protocol: fast path, slow path, weight/priority orchestration,
+│                            #   timeouts, failure detection, leader election
+├── service.go              # net/rpc surface: ConsensusService, RequestVote, Ping, ownership RPCs
+├── conns.go                # Connection management, per-connection FIFO ordering, gob registration
+├── metrics_server.go        # Runtime metrics endpoint
+├── utils.go                 # Logging setup
 │
-├── config/                   # Cluster config parsing (IPs, ports, node weights)
 ├── smr/                      # State machine layer
-├── mongodb/                  # MongoDB integration (YCSB workload support)
-│   ├── mgdb_main.go          # MongoDB workload entry point
-│   ├── mgdb_leader.go        # YCSB query parser (INSERT/READ/UPDATE/SCAN)
-│   ├── mgdb_follower.go      # MongoDB client pool, query execution
-│   └── mgdb_dbClient.go      # Raw MongoDB CRUD operations + bulkWrite batching
+│   ├── state.go               #   ObjectState/ServerState: per-object weights, thresholds, provisional apply
+│   ├── pmgr.go                 #   PriorityManager: global weight vector, geometric-ratio search, reassignment
+│   └── priority.go              #   PriorityState: this replica's own current priority clock/value
 │
-├── eval/                     # Evaluation output (per-client CSV files)
-├── ycsb/                     # YCSB workload data files
-│   └── scripts/              # Workload generation scripts
+├── config/                        # Cluster config parsing + one .conf file per topology
+├── mongodb/                        # MongoDB integration (YCSB workload execution layer)
+├── eval/                            # Evaluation output (per-client/per-server CSVs) + PerfMeter
+├── ycsb/                             # YCSB workload config + generated data files
 │
-├── start_cluster.sh          # Start all server nodes
-├── start_cluster_homo.sh     # Homogeneous cluster variant
-├── start_cluster_hetero.sh   # Heterogeneous cluster (varying node weights)
-├── stop_cluster.sh           # Graceful cluster shutdown
-├── run_woc.sh                # Run client benchmark
-├── run_mongodb_workload_hetero.sh
-├── start_mongodb_hetero.sh
-├── stop_mongodb_hetero.sh
-├── distribute_tani_key.sh    # SSH key distribution to cluster nodes
-├── delete_woc_homo.sh        # Cleanup helper
-└── merge_eval.py             # Merge per-client eval CSVs into unified results
+├── run_woc.sh                        # Build + run a full localhost cluster in one command
+├── merge_eval.py                      # Merge per-client/per-server eval CSVs
+├── extract_metrics.py                  # Summarize a sweep directory into one CSV
+├── plot_timeseries.py                   # Render time-series plots from eval CSVs
+│
+└── scripts/                              # Distributed deployment + evaluation sweeps (below)
 ```
+
+> **All scripts except `run_woc.sh` live under `scripts/`** - distributed
+> cluster deployment, MongoDB/YCSB helpers, and every evaluation sweep. Those
+> scripts target the authors' own private test cluster (hardcoded IPs, SSH
+> user `ubuntu`, key `~/.ssh/tani.pem`, remote path `/home/ubuntu/woc`) 
+> edit the IP arrays at the top of each before pointing them elsewhere.
 
 ---
 
 ## Getting Started
 
-### Prerequisites
-
-- Go 1.21+
-- MongoDB 6.0+ (for MongoDB workload mode)
-- A cluster of machines with SSH access (or localhost for single-node testing)
-
-### Build
+**Prerequisites:** Go 1.21+ (tested with 1.22); MongoDB 6.0+ only for the
+MongoDB/YCSB workload mode.
 
 ```bash
 git clone https://github.com/tanishaf28/woc.git
@@ -167,247 +162,185 @@ cd woc
 go build -o woc .
 ```
 
-### Single-node quick test
+**One-command local cluster:**
 
 ```bash
-# Terminal 1: Start server (node 0, 5-node config, localhost)
-./woc -server -id 0 -n 5 -config config/local.json
-
-# Terminal 2: Run client (95% independent, sequential mode)
-./woc -client -id 0 -n 5 -config config/local.json \
-      -indep 95 -ops 10000
+./run_woc.sh
 ```
 
-### Cluster deployment
+Builds, starts a 5-node localhost cluster (`config/cluster_localhost.conf`)
+plus 2 clients, and runs until `Ctrl+C` (graceful shutdown, saves metrics to
+`eval/`). Every variable at the top of the script is env-overridable:
 
 ```bash
-# 1. Distribute SSH keys
-./distribute_tani_key.sh
+INDEP_RATIO=50 BATCHSIZE=100 NUM_SERVERS=7 ./run_woc.sh
+```
 
-# 2. Start all 5 nodes (homogeneous weights)
-./start_cluster_homo.sh
+**Manual quick test** (real flag names - `-role` not `-server`/`-client`,
+`-path` not `-config`, `-b` not `-batch`, `-ms` not `-msgsize`; `-pinserver`
+is required for clients, no round-robin default):
 
-# 3. Run benchmark
-./run_woc.sh
-
-# 4. Stop cluster
-./stop_cluster.sh
-
-# 5. Merge evaluation results
-python3 merge_eval.py
+```bash
+./woc -role=0 -id=0 -n=5 -t=1 -path=config/cluster_localhost.conf -indep=90
+# ...repeat -id=1..4 for the rest of the cluster, then:
+./woc -role=1 -id=5 -n=5 -t=1 -path=config/cluster_localhost.conf \
+      -indep=95 -pinserver=0 -ops=10000
 ```
 
 ---
 
 ## Configuration
 
-Key flags (see `parameters.go` and `main.go`):
-
 | Flag | Default | Description |
 |---|---|---|
-| `-n` | 5 | Number of server nodes |
-| `-indep` | 95 | % Independent (fast path) objects; remainder are Dependent |
+| `-role` | 0 | `0` = server, `1` = client |
+| `-n` | 10 | Number of server nodes |
+| `-t` | 1 | Fault-tolerance threshold; quorum size is `t+1` |
+| `-path` | `./config/cluster_localhost.conf` | Cluster config file path |
+| `-mode` | 0 | `0` = localhost, `1` = distributed |
+| `-et` | 0 | Eval type: `0` = plain message, `1` = MongoDB |
+| `-indep` | 90 | % Independent (fast-path) objects |
 | `-numobjects` | 1000 | Size of the fixed, hash-ring-mapped object pool |
-| `-batch` | 1 | Operations per RPC batch |
-| `-ops` | 0 (∞) | Total operations (0 = run until SIGINT) |
-| `-msgsize` | 512 | Payload size in bytes |
-| `-readratio` | 0 | % of operations that are reads (0 = all writes) |
-| `-readmode` | `fast` | `fast` (any replica, zero coordination, speculative) or `safe` (weighted-quorum confirmation before returning a value) |
+| `-b` | 1 | Operations per RPC batch |
+| `-bcomp` | `object-specific` | `mixed`, `object-specific`, `single_obj`, or `multi_obj` |
+| `-ops` | 1000 | Total ops (client); `0` = run until SIGINT |
+| `-readratio` / `-readmode` | 0 / `fast` | % reads; `fast` (no quorum) or `safe` (weighted quorum) |
+| `-pinserver` | required | Client's initial contact server (no round-robin default) |
+| `-ep` | true | `true` = weighted (Cabinet-style), `false` = plain Raft-style |
+| `-cm` / `-ct` / `-crashtarget` | 0 / 20 / -1 | Crash-simulation mode / round count / target replica |
+| `-hotobjthreshold` / `-hotobjid` | -1 / `obj-0` | Give one object a different `-t` than the rest |
+| `-pd` / `-log` | false / debug | Production mode (logs to `./logs/`) / log level |
 
-Environment variables:
+**Environment variables:** `PIPELINE_MODE`, `MAX_INFLIGHT`,
+`USE_ADAPTIVE_LIMITER` / `USE_SIMPLE_LIMITER`, `LATENCY_DEBUG`,
+`SERVER_BATCHING`, `MONGODB_URI`.
 
-| Variable | Values | Effect |
+---
+
+## Distributed Cluster Deployment
+
+Scripts under `scripts/` build the binary locally, distribute it plus
+config, and launch/stop the cluster over SSH - one start/stop pair per
+topology:
+
+| Topology | Start / Stop | Node config |
 |---|---|---|
-| `PIPELINE_MODE` | `true` | Enable open-loop pipelined client |
-| `MAX_INFLIGHT` | integer | Max concurrent in-flight batches |
-| `USE_ADAPTIVE_LIMITER` | `true` | AdaptiveLimiter (adjusts based on path feedback) |
-| `USE_SIMPLE_LIMITER` | `true` | SimpleLimiter (static semaphore) |
-| `NO_LIMITER` | `true` | NoOpLimiter (localhost testing, zero overhead) |
-| `LATENCY_DEBUG` | `true` | Detailed per-RPC latency breakdowns in logs |
-| `MONGODB_URI` | URI string | MongoDB connection string (default: `localhost:27017`) |
+| Heterogeneous (paper's main setup) | `start_cluster_hetero.sh` / `stop_cluster_hetero.sh` | `config/cluster_hetero_*n_*.conf` (n ∈ {3,5,7,11}) |
+| Homogeneous | `start_cluster_homo.sh` / `stop_cluster_homo.sh` | `config/cluster_homo.conf` (flat pool, any size) |
+
+```bash
+./scripts/distribute_tani_key.sh                                     # 1. SSH keys
+NUM_SERVERS=5 INDEP_RATIO=90 BATCHSIZE=10 ./scripts/start_cluster_hetero.sh  # 2. start
+./scripts/stop_cluster_hetero.sh                                     # 3. stop + collect + merge
+```
+
+`scripts/start_cluster.sh`/`stop_cluster.sh` (no suffix) are an older,
+pre-split variant kept for reference prefer the pair above.
+
+> **Gotcha:** start scripts read `NUM_SERVERS`/`NUM_CLIENTS`; the matching
+> stop scripts read `SERVER_COUNT`/`CLIENT_COUNT` instead set both when
+> overriding cluster size, or the stop side silently reverts to its default.
 
 ---
 
 ## MongoDB / YCSB Workload
 
-CORA includes a MongoDB execution layer that runs YCSB-format workloads through
-the consensus protocol: each replica applies committed operations to its own
-**independent, standalone** MongoDB instance (no MongoDB-level replica set —
-CORA does the replication, not MongoDB). The pipeline is three steps: generate
-YCSB data locally, distribute it to the cluster, then start/stop the
-MongoDB-backed cluster.
-
-### 0. Prerequisites
-
-- The remote scripts under `scripts/` target a specific hardcoded topology: 5
-  server IPs (`SERVER_IPS`) + 2 client IPs (`CLIENT_HOST_IPS`), SSH user
-  `ubuntu`, remote path `/home/ubuntu/woc`, key `~/.ssh/tani.pem`. Edit those
-  arrays at the top of each script (`start_mongodb_hetero.sh`,
-  `stop_mongodb_hetero.sh`, `scripts/distribute_ycsb.sh`, and the
-  `run_mongodb_*_sweep_5n.sh` scripts) to match your own cluster's IPs before
-  running anything.
-- Push the SSH key to every node first (reads the IPs out of
-  `config/cluster_hetero.conf` / `config/cluster_homo.conf`):
-  ```bash
-  ./scripts/distribute_tani_key.sh
-  ```
-- MongoDB 6.0+ must be installed (as the `mongod` binary) on every server
-  node; `mongosh` is used locally by the readiness checks.
-
-### 1. Generate YCSB data files
-
-Data generation lives under `ycsb/scripts/`, not the repo root, and drives
-the real `ycsb` benchmark tool (auto-cloned/built on first run — needs a JDK
-and Maven, both auto-installed locally if missing):
+Each replica applies committed ops to its own **standalone** MongoDB
+instance no Mongo replica set; CORA does the replication. Paper's §6.2
+results use YCSB Workload A (50% read / 50% update).
 
 ```bash
-cd ycsb/scripts
-./genData.sh
-```
+# 0. Edit IP arrays in scripts/start_mongodb_hetero.sh, stop_mongodb_hetero.sh,
+#    distribute_ycsb.sh, and run_mongodb_*_sweep_5n.sh for your cluster, then:
+./scripts/distribute_tani_key.sh
 
-This clones/builds YCSB into `./YCSB` if not already present, then for each
-workload letter `a`-`f` generates:
-- `ycsb/workData/workload.dat` — the load phase (INSERTs only), generated
-  once from `ycsb/config/workloada`. Every replica loads this same file at
-  startup (`initMongoDB()` in `conns.go`) to seed its local database.
-- `ycsb/workData/run_workload{a..f}.dat` — the run phase for each workload,
-  generated from `ycsb/config/workload{a..f}`. Clients read the one matching
-  `-mload`/`WORKLOAD` directly at runtime.
+# 1. Generate YCSB data (checked-in workload*.dat is sized recordcount=100000;
+#    the checked-in ycsb/config/workload* defaults to a 10/10 smoke test)
+cd ycsb/scripts && ./genData.sh
+# or one workload at a time: ./genSingleData.sh -f a -r 100000 -o 100000
 
-**Recordcount/operationcount default to 10/10** in the checked-in
-`ycsb/config/workload*` files (a tiny smoke-test size) — that's *not* what
-generated the `.dat` files already committed in this repo (those are sized
-for `recordcount=100000`). To regenerate at that scale, either edit
-`recordcount`/`operationcount` in `ycsb/config/workload{a..f}` before running
-`genData.sh`, or generate one workload at a time with explicit sizes:
-
-```bash
-./genSingleData.sh -f a -r 100000 -o 100000   # workload a, 100k records/ops
-```
-
-### 2. Distribute YCSB data to the cluster
-
-`start_mongodb_hetero.sh` only auto-syncs `workload.dat` to the *server*
-nodes as part of its own setup. Client nodes need the `run_workload*.dat`
-files too (they read them directly), so run this once after generating data
-and before starting the cluster:
-
-```bash
+# 2. Distribute data (servers auto-sync workload.dat; clients need run_workload*.dat too)
 ./scripts/distribute_ycsb.sh
-```
 
-Copies every `ycsb/workData/*.dat` file to all server *and* client IPs over
-scp, then verifies the file count landed on each node.
+# 3. Run (builds, deploys, starts mongod + WOC servers/clients; open-ended)
+INDEP_RATIO=90 BATCHSIZE=25 ./scripts/start_mongodb_hetero.sh a   # workload letter a-f
 
-### 3. Run the MongoDB-backed cluster
-
-```bash
-./scripts/start_mongodb_hetero.sh a      # workload letter (a-f), default a
-```
-
-This one script does the whole cluster lifecycle: builds the binary locally,
-distributes it (+ config + `workload.dat`) to every server/client, starts a
-fresh standalone `mongod` per server (drops any previous data), waits for
-each to report ready, starts the WOC servers (each independently reloads
-`workload.dat` into its own local database), waits for their RPC listeners,
-then starts the WOC clients pinned round-robin across servers. Runs
-open-ended (`-ops=0`) until stopped.
-
-Tune it via environment variables (defaults shown):
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `INDEP_RATIO` | `100.0` | % independent (fast-path) objects |
-| `BATCHSIZE` | `10` | ops per RPC batch |
-| `NUM_OBJECTS` | `1000` | size of the fixed object pool |
-| `READ_RATIO` | `0.0` | % of ops that are reads |
-| `THRESHOLD` | `1` | fault-tolerance threshold (quorum = t+1) |
-| `NUM_CLIENTS` | `2` | MongoDB client connections per server |
-| `MAX_INFLIGHT` | `5` | pipelined client concurrency |
-| `LOG_LEVEL` | `info` | `info` or `debug` |
-
-```bash
-# Example: 50/50 independent-dependent split, batch of 25, workload a
-INDEP_RATIO=50 BATCHSIZE=25 ./scripts/start_mongodb_hetero.sh a
-```
-
-Let it run for as long as you want the benchmark to collect data, then stop
-and collect results:
-
-```bash
+# 4. Stop + collect (merges eval/ from every node into scripts/eval/merged/)
 ./scripts/stop_mongodb_hetero.sh
 ```
 
-Gracefully kills clients (waits up to 45s, then SIGKILLs), then servers
-(waits up to 60s, then SIGKILLs), copies every node's `eval/` directory back
-to `scripts/eval/`, and merges the per-client and per-server CSVs via
-`merge_eval.py` into `scripts/eval/merged/`.
+Tunable env vars (defaults): `INDEP_RATIO=100.0`, `BATCHSIZE=10`,
+`NUM_OBJECTS=1000`, `READ_RATIO=0.0`, `THRESHOLD=1`, `NUM_CLIENTS=2`,
+`MAX_INFLIGHT=5`, `LOG_LEVEL=info`.
 
-### 4. Automated sweeps (optional)
+Automated sweeps: `RUNTIME_SECONDS=30 WORKLOAD=a ./scripts/run_mongodb_ratio_sweep_5n.sh`
+and `..._batchsize_sweep_5n.sh` - each archives results under
+`scripts/results/mongodb_*_sweep_5n/<timestamp>/` and runs `extract_metrics.py`.
 
-For a full parameter sweep instead of one manual start/stop, use:
-
-```bash
-RUNTIME_SECONDS=30 WORKLOAD=a ./scripts/run_mongodb_ratio_sweep_5n.sh      # sweeps INDEP_RATIO: 100,90,80,60,40,20,10,0
-RUNTIME_SECONDS=30 WORKLOAD=a ./scripts/run_mongodb_batchsize_sweep_5n.sh  # sweeps BATCHSIZE
-```
-
-Each internally calls `start_mongodb_hetero.sh` / `stop_mongodb_hetero.sh`
-once per test case, archives each case's merged CSVs under
-`scripts/results/mongodb_*_sweep_5n/<timestamp>/`, and finishes by running
-`extract_metrics.py` for a summary CSV.
-
-Two older, self-contained variants of the same idea exist as
-`scripts/eval_1_indep_ratio.sh` (indep-ratio sweep) and
-`scripts/eval_2_batching.sh` (batch-size sweep) — they embed their own
-mongod start/stop instead of delegating to `start_mongodb_hetero.sh`, but
-follow the same standalone-per-node MongoDB setup.
-
-### Key mapping to CORA object types
-
-| YCSB key | CORA classification |
-|---|---|
-| Key hashes independent under `-indep` (`classifyRealKey` in `objectmap.go`) | `IndependentObject` → fast path |
-| Key hashes dependent | `DependentObject` → slow path |
+Key classification: a key hashes independent under `-indep`
+(`classifyRealKey` in `objectmap.go`) → fast path; else → slow path.
 
 ---
 
 ## Evaluation Sweeps
-Results land in `./eval/client{N}/` as CSV files. Merge across clients with:
+
+Results land in `./eval/client{N}/` and `./eval/server{N}/`; merge with
+`python3 merge_eval.py`. `run_woc.sh` takes every parameter as an
+environment-variable override, so the paper's single-machine sweeps are
+direct loops over it:
 
 ```bash
-python3 merge_eval.py
+# I2D ratio (§6.1.1/Fig. 3)
+for indep in 100 90 80 60 40 20 10 0; do INDEP_RATIO=$indep NUM_SERVERS=5 ./run_woc.sh; done
+
+# Client scalability (§6.1.2/Fig. 4)
+for nc in 2 5 10 20 30 40 50; do NUM_CLIENTS=$nc INDEP_RATIO=90 ./run_woc.sh; done
+
+# Batch size (§6.1.3/Fig. 5)
+for batch in 1 10 100 500 1000 2000; do BATCHSIZE=$batch INDEP_RATIO=90 ./run_woc.sh; done
+
+# Failure-threshold sensitivity (§6.1.4/Fig. 6)
+for t in 1 2 3 4 5; do THRESHOLD=$t INDEP_RATIO=100 NUM_SERVERS=11 ./run_woc.sh; done
+
+# Read-ratio sensitivity (§6.1.5/Fig. 7)
+for r in 0 25 50 75 100; do READ_RATIO=$r READ_MODE=safe ./run_woc.sh; done
 ```
 
-### Reproduce paper experiments
+For the heterogeneous-cluster and MongoDB/YCSB figures, use the matching
+`scripts/*_sweep*.sh` drivers on a real multi-machine deployment.
+
+---
+
+## Development
 
 ```bash
-# Contention sweep (Section 8.2): vary --indep from 100 to 0
-for indep in 100 90 80 60 40 20 0; do
-  PIPELINE_MODE=true MAX_INFLIGHT=10 ./run_woc.sh --indep $indep
-done
-
-# Pipelining sweep (Section 8.4): vary MAX_INFLIGHT
-for inflight in 1 5 10 20 30 40 50 55; do
-  PIPELINE_MODE=true MAX_INFLIGHT=$inflight ./run_woc.sh
-done
-
-# Batch size sweep (Section 8.5): vary -batch
-for batch in 1 10 50 100 500 1000 2000; do
-  ./run_woc.sh -batch $batch
-done
+go build ./...   # build everything, including smr/, config/, mongodb/
+go vet ./...      # static checks
+go test ./...      # unit tests
+gofmt -l .          # should print nothing
 ```
 
 ---
 
-## Paper
+## Performance
 
-**CORA: Adaptive Object Weighted Consensus Made Efficient**   
-arXiv: [2512.20485](https://arxiv.org/abs/2512.20485)
+Headline numbers from the paper (§6), heterogeneous `n = 5` unless noted:
+
+| Scenario | CORA | Best baseline | Speedup |
+|---|---|---|---|
+| I2D=100/0 (all independent, no batching) | 11.3 KTPS @ 0.86 ms | EPaxos: 6.1 KTPS @ 1.24 ms | 1.86× |
+| I2D=100/0 vs. Cabinet / Raft | 11.3 KTPS | Cabinet: 774 TPS · Raft: 483 TPS | 16× / 22.6× |
+| Client scaling (I2D=90/10, peak) | 19 KTPS @ 13 ms (35 clients) | EPaxos: 13 KTPS @ 21 ms | 1.46× |
+| Batching (I2D=90/10, b=2000) | 570K TPS @ 20 ms | EPaxos: 1.5× lower throughput, 2× higher latency | 1.5–6.3× vs. all |
+| YCSB Workload A over MongoDB (I2D=100/0) | 8,932 TPS @ 0.93 ms | EPaxos: 5,251 TPS @ 1.87 ms | 1.7×, ~half latency |
+
+Across the full evaluation, CORA achieves **1.86–22.6×** higher throughput
+than EPaxos/Cabinet/Raft, with the largest margins on heterogeneous clusters
+and independent-heavy workloads.
 
 ---
+Artifact repository: <https://github.com/tanishaf28/woc>
 
 ## License
-MIT
 
----
+MIT

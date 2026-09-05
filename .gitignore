@@ -1,11 +1,27 @@
 logs/
 eval/*.csv
+eval/**/*.csv
+scripts/eval/
+scripts/results/
 *.log
 *.zip
 *.tar
 *.bin
 *.dat
 .claude/
+
+# Windows NTFS zone-identifier metadata (leaks through WSL interop)
+*:Zone.Identifier
+
+# Compiled binaries (build with `go build -o woc .`)
+/woc
+/woc.exe
+/scripts/woc
+/scripts/woc.exe
+
+# Python bytecode cache
+__pycache__/
+*.pyc
 
 # Generated MongoDB data
 mongodb_data/

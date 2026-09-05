@@ -4,7 +4,7 @@
 #
 # Sweeps BATCHSIZE over 1,10,50,100,500,1000,2000 (mirrors this repo's
 # eval_6_batchsize_size_sweep.sh / epaxos port's
-# run_mongodb_batchsize_sweep_5n.sh) with INDEP_RATIO=90 fixed, against
+# run_mongodb_batchsize_sweep_5n.sh) with INDEP_RATIO="${INDEP_RATIO:-90.0}" fixed, against
 # the MongoDB-backed cluster (start_mongodb_hetero.sh, -et=1).
 # ================================================================
 
@@ -43,7 +43,7 @@ if [[ "${1:-}" == "--help" ]]; then
     cat <<'EOF'
 Usage: bash run_mongodb_batchsize_sweep_5n.sh
 
-Sweeps BATCHSIZE over 1,10,50,100,500,1000,2000 with INDEP_RATIO=90
+Sweeps BATCHSIZE over 1,10,50,100,500,1000,2000 with INDEP_RATIO="${INDEP_RATIO:-90.0}"
 fixed, against the heterogeneous 5-node WOC MongoDB replica set
 (start_mongodb_hetero.sh, -et=1).
 
@@ -110,7 +110,7 @@ run_case() {
     echo "=================================================="
 
     CLUSTER_ACTIVE=true
-    INDEP_RATIO=90.0 BATCHSIZE="$batch_size" NUM_OBJECTS=1000 READ_RATIO=0.0 \
+    INDEP_RATIO="${INDEP_RATIO:-90.0}" BATCHSIZE="$batch_size" NUM_OBJECTS=1000 READ_RATIO=0.0 \
         bash "$START_SCRIPT" "$WORKLOAD"
     sleep "$RUNTIME_SECONDS"
     bash "$STOP_SCRIPT"

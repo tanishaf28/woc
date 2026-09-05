@@ -1,13 +1,14 @@
 #!/bin/bash
 # ================================================================
-# HETERO-5 NETEM I2D SWEEP: independent-ratio sweep (100 -> 0) under a
-# single fixed server-side-only netem delay profile.
+# HETERO-5 NETEM RATIO SWEEP + TIMELINE (WOC): independent-ratio sweep
+# (100 -> 0) under a fixed server-side-only netem delay profile, with a
+# 5-client pool and BATCHSIZE=1000, followed by a single INDEP_RATIO=90
+# timeline run (ENABLE_TIMESERIES=true).
 #
-# Delay is applied ONCE before the first case and removed ONCE after the
-# last case (not toggled per case) -- mirrors run_hetero5_netem_eval.sh's
-# apply_server_only_delay/remove_server_delay, looped across INDEP_RATIO
-# test cases the same way eval_1_indep_ratio.sh sweeps INDEP_RATIO for the
-# plain (non-netem) MongoDB workload.
+# Identical to run_hetero5_ratio_delay_5c_b100.sh except BATCHSIZE
+# 100->1000 -- see that script for the full rationale (and for why
+# SERVER_IPS is derived from CONFIG_PATH here rather than hardcoded, unlike
+# epaxos's b1000 original).
 # ================================================================
 
 set -euo pipefail
@@ -20,44 +21,32 @@ START_SCRIPT="${SCRIPT_DIR}/start_cluster_hetero.sh"
 STOP_SCRIPT="${SCRIPT_DIR}/stop_cluster_hetero.sh"
 SSH_KEY="/home/ubuntu/.ssh/tani.pem"
 USER="ubuntu"
+CONFIG_PATH="${REPO_ROOT}/config/cluster_hetero_5n_10c.conf"
 
-RESULT_ROOT="${SCRIPT_DIR}/results/hetero5_netem_i2d_sweep"
+RESULT_ROOT="${SCRIPT_DIR}/results/hetero5_ratio_delay_5c_b1000"
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
 RUN_DIR="${RESULT_ROOT}/${RUN_TS}"
 
 DELAY_MS="${DELAY_MS:-10}"
-JITTER_MS="${JITTER_MS:-5}"
+JITTER_MS="${JITTER_MS:-10}"
 RUNTIME_SECONDS="${RUNTIME_SECONDS:-30}"
 DELAY_APPLIED=false
 CLUSTER_ACTIVE=false
 
 BASE_ENV=(
     "NUM_SERVERS=5"
-    "NUM_CLIENTS=2"
-    "THRESHOLD=1"
-    "BATCHSIZE=1"
+    "NUM_CLIENTS=5"
+    "CONFIG_PATH=${CONFIG_PATH}"
+    "THRESHOLD=2"
+    "BATCHSIZE=1000"
     "PIPELINE_MODE=true"
     "MAX_INFLIGHT=5"
     "LOG_LEVEL=info"
-    "ENABLE_PRIORITY=true"
 )
 
-# Same sweep points as eval_1_indep_ratio.sh, 100 (all independent) -> 0
-# (all dependent).
 TEST_CASES=(100.0 90.0 80.0 60.0 40.0 20.0 10.0 0.0)
 
-SERVER_IPS=(
-    "192.168.73.59"
-    "192.168.73.243"
-    "192.168.73.27"
-    "192.168.73.157"
-    "192.168.73.78"
-)
-
-CLIENT_IPS=(
-    "192.168.73.167"
-    "192.168.73.137"
-)
+mapfile -t SERVER_IPS < <(awk 'NF >= 2 {print $2}' "$CONFIG_PATH" | head -5)
 
 mkdir -p "$RUN_DIR"
 
@@ -72,17 +61,10 @@ detect_interface() {
     remote_exec "$host" "ip route show default 2>/dev/null | awk '{print \$5; exit}'"
 }
 
-# apply_server_only_delay: installs the tc qdisc rule on SERVER_IPS only -
-# no CLIENT_IPS interface is ever touched. This delays everything egressing
-# a server's own interface, though, including replies to clients and
-# server-to-server traffic, so it still shows up in client-observed
-# round-trip latency - "server-side only" describes where the tc rule is
-# installed, not which side of the RTT it affects (see
-# run_hetero5_netem_eval.sh's header for the fuller explanation).
 apply_server_only_delay() {
     local delay_ms=$1
     local jitter_ms=$2
-    echo "  [netem] Applying ${delay_ms}ms ±${jitter_ms}ms to server links only..."
+    echo "  [netem] Applying ${delay_ms}ms +-${jitter_ms}ms to server links only..."
     for ip in "${SERVER_IPS[@]}"; do
         local iface
         iface=$(detect_interface "$ip")
@@ -106,33 +88,27 @@ remove_server_delay() {
     sleep 1
 }
 
-# archive_case copies only merged CSVs newer than this case's marker, so
-# each case's folder gets just its own run (stop_cluster_hetero.sh never
-# cleans old merged_woc_*.csv files, they only accumulate). Files land in a
-# 'merged' subdir, not the case dir directly -- extract_metrics.py globs
-# for <run_dir>/**/merged/merged_woc_{clients,servers}_*.csv and derives the
-# case label from the parent of that 'merged' dir, so without this nesting
-# the final rollup silently finds nothing.
 archive_case() {
     local label=$1
     local marker=$2
-    local dest_dir="${RUN_DIR}/${label}/merged"
+    local dest_dir="${RUN_DIR}/${label}"
     mkdir -p "$dest_dir"
     local merged_dir="${SCRIPT_DIR}/eval/merged"
     if [ -d "$merged_dir" ]; then
         find "$merged_dir" -maxdepth 1 -name "*.csv" -newer "$marker" -exec cp {} "$dest_dir/" \; 2>/dev/null || true
         if [ -z "$(ls "$dest_dir"/*.csv 2>/dev/null)" ]; then
             local newest
-            newest=$(ls -t "$merged_dir"/*.csv 2>/dev/null | head -1)
+            newest=$(ls -t "$merged_dir"/*.csv 2>/dev/null | head -1) || true
             [ -n "$newest" ] && cp "$newest" "$dest_dir/"
         fi
     fi
+    find "${SCRIPT_DIR}/eval" -mindepth 2 -maxdepth 2 -name "tps_timeline_*.csv" -newer "$marker" -exec cp {} "${dest_dir}/" \; 2>/dev/null || true
     echo "  Archived results to: $dest_dir"
 }
 
 cleanup() {
     if [ "$CLUSTER_ACTIVE" = true ]; then
-        bash "$STOP_SCRIPT" || true
+        CLIENT_COUNT=5 CONFIG_PATH="${CONFIG_PATH}" bash "$STOP_SCRIPT" || true
     fi
     if [ "$DELAY_APPLIED" = true ]; then
         remove_server_delay || true
@@ -142,41 +118,44 @@ trap cleanup EXIT
 
 run_case() {
     local indep=$1
-    local case_num=$2
-    local label="indep_${indep}"
+    local label=$2
+    local extra_env=("${@:3}")
+
+    touch "${RUN_DIR}/.marker_${label}"
     local marker="${RUN_DIR}/.marker_${label}"
 
-    echo ""
-    echo "--- Case ${case_num}/${#TEST_CASES[@]}: INDEP_RATIO=${indep} ---"
-
-    touch "$marker"
-
     CLUSTER_ACTIVE=true
-    env "${BASE_ENV[@]}" "INDEP_RATIO=${indep}" bash "$START_SCRIPT"
+    env "${BASE_ENV[@]}" "INDEP_RATIO=${indep}" "${extra_env[@]}" bash "$START_SCRIPT"
 
     echo "  Running for ${RUNTIME_SECONDS}s..."
     sleep "$RUNTIME_SECONDS"
 
-    bash "$STOP_SCRIPT"
+    CLIENT_COUNT=5 CONFIG_PATH="${CONFIG_PATH}" bash "$STOP_SCRIPT"
     CLUSTER_ACTIVE=false
 
     archive_case "$label" "$marker"
 }
 
-echo "╔════════════════════════════════════════════════════════════════╗"
-echo "║   HETERO-5 NETEM I2D SWEEP: ${DELAY_MS}ms ±${JITTER_MS}ms (server-side only)  ║"
-echo "╚════════════════════════════════════════════════════════════════╝"
+echo "================================================================"
+echo " HETERO-5 NETEM RATIO SWEEP + TIMELINE (WOC): ${DELAY_MS}ms +-${JITTER_MS}ms, 5 clients, batch=1000"
+echo "================================================================"
 echo "Result archive: $RUN_DIR"
-echo "Test cases (INDEP_RATIO): ${TEST_CASES[*]}"
+echo "Sweep test cases (INDEP_RATIO): ${TEST_CASES[*]}"
 
 apply_server_only_delay "$DELAY_MS" "$JITTER_MS"
 DELAY_APPLIED=true
 
 case_num=1
 for indep in "${TEST_CASES[@]}"; do
-    run_case "$indep" "$case_num"
+    echo ""
+    echo "--- Sweep case ${case_num}/${#TEST_CASES[@]}: INDEP_RATIO=${indep} ---"
+    run_case "$indep" "indep_${indep}"
     case_num=$((case_num + 1))
 done
+
+echo ""
+echo "--- Timeline case: INDEP_RATIO=90 (ENABLE_TIMESERIES=true) ---"
+run_case "90.0" "indep_90_timeline" "ENABLE_TIMESERIES=true"
 
 remove_server_delay
 DELAY_APPLIED=false
@@ -187,6 +166,6 @@ python3 "${REPO_ROOT}/extract_metrics.py" "$RUN_DIR" --size 5
 
 echo ""
 echo "=================================================="
-echo " Hetero-5 netem i2d sweep complete"
+echo " Hetero-5 netem ratio sweep + timeline complete (WOC)"
 echo "=================================================="
 echo "Results archived in: $RUN_DIR"

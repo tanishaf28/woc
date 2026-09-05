@@ -12,36 +12,8 @@ const (
 const (
 	PlainMsg = iota
 	MongoDB
-	// RingReconfig marks a command carrying a RingUpdate payload (see
-	// objectmap.go) - the object-ownership ring/dead-replica-set change a
-	// replica's health monitor proposes, routed through the same slow-path
-	// consensus round as any other dependent-object command so every
-	// replica adopts it at the same global order position (see
-	// conJobRingReconfig in service.go).
 	RingReconfig
-	// FallBack marks a best-effort, fire-and-forget broadcast the fast-path
-	// coordinator sends when it fails to reach quorum before timing out: it
-	// tells followers to revert their provisional apply for one (ObjID, Seq)
-	// pair if it hasn't since been superseded (see conJobFallBack in
-	// service.go, and ObjectState.RevertIfSeqMatches). Unlike RingReconfig,
-	// this is NOT routed through slow-path consensus - reverting a replica's
-	// own local provisional state doesn't need cluster agreement, and is
-	// safe to miss (the next real commit for that object supersedes it via
-	// the same seq guard).
 	FallBack
-	// MongoConfirm marks a best-effort, fire-and-forget broadcast the
-	// fast-path coordinator sends AFTER reaching quorum for a MongoDB
-	// command: unlike PlainMsg, a follower's fast-path vote for a MongoDB
-	// proposal never applies the write to its local MongoDB (see
-	// applyExecute's MongoDB case) - a real, external database write can't
-	// be cheaply/safely undone the way an in-memory ObjectState.Value can if
-	// the round times out (see the FallBack comment above), so followers
-	// only physically write once the round is known to have committed.
-	// MongoConfirm is that "now write it for real" signal (see
-	// conJobMongoConfirm in service.go). Safe to miss: the next real commit
-	// for the same key carries the current data forward regardless, and a
-	// FastRead against a replica that missed one confirm is stale rather
-	// than wrong.
 	MongoConfirm
 )
 
@@ -57,10 +29,6 @@ const (
 	READ
 )
 
-// Read modes: FastRead answers from whichever replica was asked, with no
-// coordination (speculative, no safety guarantee). SafeRead first confirms
-// a weighted quorum (the same per-object/global thresholds writes use)
-// before returning its local value.
 const (
 	FastRead = iota
 	SafeRead
@@ -99,8 +67,8 @@ var crashTarget int // replica ID to kill alone when crashMode == 4
 // suffix of files
 var suffix string
 
-var indepRatio float64  // % of independent objects; drives the object registry split (see objectmap.go)
-var numObjects int      // total size of the fixed, hash-ring-mapped object pool (paper §3-§4)
+var indepRatio float64 // % of independent objects; drives the object registry split (see objectmap.go)
+var numObjects int     // total size of the fixed, hash-ring-mapped object pool (paper §3-§4)
 var clientID int
 var role int
 var batchComposition string // "mixed" or "object-specific"
@@ -111,21 +79,9 @@ var readMode int        // parsed into FastRead or SafeRead
 
 var numClients int // total client processes in this run; used to spread "ownership" of real (e.g. YCSB) keys across clients for the MongoDB workload (see objectmap.go's keyOwnerClientIdx)
 var pinServer int  // required, >=0: always send to this server ID (round-robin dispatch has been removed)
-
-// hotObjThreshold/hotObjID let one specific object use a failure threshold
-// (and therefore fast-path quorum size/weight vector) different from every
-// other object's -t, within the same run - demonstrating the paper's
-// per-object independence claim (§3.2), which a single global -t can't:
-// every other consensus protocol here (Cabinet, Raft) has exactly one
-// threshold for the whole system. Disabled (hotObjThreshold < 0) by
-// default; wired into preWarmAllObjects (main.go).
 var hotObjThreshold int
 var hotObjID string
 
-// targetObjID, when set, pins every client operation to this exact object
-// ID for the whole run (instead of the usual random per-type pick), so a
-// client can generate a workload measuring one specific object's own
-// throughput/latency - see the -hotobjthreshold eval.
 var targetObjID string
 
 func loadCommandLineInputs() {
@@ -180,14 +136,6 @@ func loadCommandLineInputs() {
 	flag.StringVar(&readModeFlag, "readmode", "fast", "read mode: 'fast' (any replica, no quorum) or 'safe' (weighted quorum confirmation)")
 
 	flag.IntVar(&numClients, "numclients", 1, "total number of client processes in this run (used to spread ownership of real MongoDB/YCSB keys across clients)")
-	// -pinserver only selects the client's initial contact point, not the
-	// replica that actually coordinates a write: independent objects always
-	// route to their owner on the hash ring (see objectmap.go's
-	// ObjectOwner), and dependent objects always route to the leader,
-	// regardless of which server the client happened to pin to. Required
-	// (no round-robin default, matching EPaxos's client) - use -pinserver to
-	// control load distribution across clients, not to control which
-	// replica handles a particular object.
 	flag.IntVar(&pinServer, "pinserver", -1, "pin client to specific server ID (required; no round-robin default)")
 
 	flag.IntVar(&hotObjThreshold, "hotobjthreshold", -1, "failure threshold (t) for the single object named by -hotobjid, independent of -t for every other object (-1 = disabled, use -t for every object)")

@@ -66,13 +66,6 @@ def _parse_case_csv(path: str) -> dict[str, float]:
 
 
 def _pick_latest(csvs: list[str]) -> str:
-    # Filenames embed a sortable generation timestamp (merge_eval.py's
-    # merged_woc_{clients,servers}_<YYYYMMDD_HHMMSS>.csv); prefer that over
-    # mtime, which only reflects when archive_case()/archive_latest_result()
-    # happened to cp the file -- a `cp` resets mtime at copy time, so when a
-    # case's archive step batches in old stale merged CSVs (e.g. the very
-    # first case of a sweep, before any -newer marker exists), mtime-based
-    # selection can pick the wrong file entirely instead of just lagging.
     return max(csvs, key=os.path.basename)
 
 

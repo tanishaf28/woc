@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson"
 	"github.com/sirupsen/logrus"
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -296,10 +296,17 @@ func followerClient(db *mongo.Database, queries []Query, qThreadNum int) (
 				return nil, time.Duration(0), err
 			}
 		}
+		// bulkLatency is the cost of ONE round trip covering every write
+		// query in this batch -- count it once, not once per query (that
+		// previously inflated a mixed read/write batch's reported latency
+		// by a factor of however many writes it contained; the write-only
+		// early-return below happened to cancel the same over-count via its
+		// own division, which is why this only showed up once batches mixed
+		// reads and writes, e.g. YCSB Workload A at BATCHSIZE > 1).
 		bulkLatency := time.Since(startTime)
+		latency += bulkLatency
 		for _, query := range queries {
 			if result := placeholderResult(query); result != nil {
-				latency += bulkLatency
 				results = append(results, result)
 			}
 		}
@@ -308,7 +315,6 @@ func followerClient(db *mongo.Database, queries []Query, qThreadNum int) (
 	// Reads/scans/drops have no native multi-key batch primitive worth the
 	// complexity here, so they still go one round-trip per query.
 	if len(readQueries) == 0 {
-		latency = time.Duration(float64(latency) / float64(len(queries)))
 		return results, latency, nil
 	}
 

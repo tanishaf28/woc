@@ -1,3 +1,0 @@
-pclock,latency (ms) per batch,throughput (Tx/sec),fast path ops,slow path ops,conflict ops
-NO_DATA,,,,,
-GLOBAL_TOTALS,,,0 ops,0 ops,0 ops

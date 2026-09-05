@@ -219,6 +219,6 @@ func TestWeightCacheConcurrentAccess(t *testing.T) {
 	}()
 
 	writerWg.Wait() // writer's loop is bounded, so this always returns
-	close(stop)      // now tell the (unbounded) readers to stop
+	close(stop)     // now tell the (unbounded) readers to stop
 	readersWg.Wait()
 }

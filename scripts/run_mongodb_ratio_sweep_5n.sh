@@ -142,7 +142,7 @@ done
 
 echo ""
 echo "Extracting throughput/latency summary..."
-python3 "${REPO_ROOT}/extract_metrics.py" "$RUN_DIR"
+python3 "${REPO_ROOT}/extract_metrics.py" "$RUN_DIR" --size 5
 
 echo ""
 echo "=================================================="

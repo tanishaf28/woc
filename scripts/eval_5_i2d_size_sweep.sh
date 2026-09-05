@@ -200,7 +200,7 @@ for n in "${ALL_CLUSTER_SIZES[@]}"; do
             "BATCHSIZE=1" "INDEP_RATIO=${indep}" "NUM_OBJECTS=1000"
             "PIPELINE_MODE=true" "MAX_INFLIGHT=${MAX_INFLIGHT:-5}"
             "USE_ADAPTIVE_LIMITER=${USE_ADAPTIVE_LIMITER:-false}"
-            "LOG_LEVEL=info" "ENABLE_PRIORITY=true"
+            "LOG_LEVEL=info" "ENABLE_PRIORITY=${ENABLE_PRIORITY:-true}"
         )
         run_case "n${n}_indep_${indep}" "$RUNTIME_SECONDS"
     done

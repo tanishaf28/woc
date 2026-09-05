@@ -2,14 +2,14 @@ package main
 
 import (
 	"fmt"
+	"github.com/sirupsen/logrus"
 	"net"
 	"net/rpc"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
-	"sync/atomic"
-	"github.com/sirupsen/logrus"
 	"woc/config"
 	"woc/eval"
 	"woc/mongodb"
@@ -26,7 +26,7 @@ var (
 	myAddr          string
 	pscheme         []float64
 	serverConfigs   [][]string
-	activeRPCs      atomic.Int64 
+	activeRPCs      atomic.Int64
 )
 
 // Type aliases
@@ -289,7 +289,15 @@ func runServerRole() {
 
 	if evalType == MongoDB {
 		go mongoDBCleanUp()
-		initMongoDB()
+		// initMongoDB's error used to be discarded here, so a failed
+		// connection/bootstrap left mongoDbFollower nil while this log line
+		// still unconditionally claimed success - every real MongoDB request
+		// then failed at conJobMongoDB's mongoDbFollower==nil check, before
+		// ever recording anything to serverPerfM, so metrics stayed at zero
+		// for the whole run with no visible reason why. Fail loudly instead.
+		if err := initMongoDB(); err != nil {
+			log.Fatalf("Server %d: MongoDB initialization failed: %v", myServerID, err)
+		}
 		log.Infof("Server %d: ✓ MongoDB initialized", myServerID)
 	}
 
@@ -319,7 +327,9 @@ func runServerRole() {
 	}
 
 	//  STEP 3: NOW start accepting RPC connections (clients can connect safely!)
-	go rpc.Accept(listener)
+	// acceptRPCConns (conns.go), not rpc.Accept directly, so every accepted
+	// connection gets SetNoDelay - see acceptRPCConns's doc comment.
+	go acceptRPCConns(listener)
 	log.Infof("Server %d:  NOW ACCEPTING RPC connections at %s", myServerID, myAddr)
 
 	// Shutdown handler: save metrics and wait for active RPCs.
@@ -334,13 +344,13 @@ func runServerRole() {
 		sig := <-sigc
 		log.Infof("Server %d: Received signal %v - starting graceful shutdown...", myServerID, sig)
 		fmt.Printf("\n  Server %d: Received signal %v - starting graceful shutdown...\n", myServerID, sig)
-		
+
 		serverShuttingDown.Store(true)
-		
+
 		// Stop accepting new connections
 		listener.Close()
 		log.Infof("Server %d: Stopped accepting new connections", myServerID)
-		
+
 		// Wait for active RPCs to complete (up to 10 seconds)
 		deadline := time.Now().Add(10 * time.Second)
 		for {
@@ -350,35 +360,35 @@ func runServerRole() {
 				fmt.Printf("Server %d: ✓ All active RPCs completed\n", myServerID)
 				break
 			}
-			
+
 			if time.Now().After(deadline) {
 				log.Warnf("Server %d:  Timeout - %d RPCs still active", myServerID, active)
 				fmt.Printf("Server %d:  Timeout - %d RPCs still active\n", myServerID, active)
 				break
 			}
-			
+
 			time.Sleep(100 * time.Millisecond)
 		}
-		
+
 		// Save metrics
 		log.Infof("Server %d:  Saving metrics...", myServerID)
 		fmt.Printf("Server %d:  Saving metrics...\n", myServerID)
-		
+
 		if err := perfM.SaveToFile(); err != nil {
 			log.Errorf("Server %d: Failed to save perf metrics: %v", myServerID, err)
 		} else {
 			log.Infof("Server %d: Performance metrics saved", myServerID)
 		}
-		
+
 		if err := cm.SaveServerMetrics(); err != nil {
 			log.Errorf("Server %d: Failed to save server metrics: %v", myServerID, err)
 		} else {
 			log.Infof("Server %d: Server metrics saved", myServerID)
 		}
-		
+
 		// File flush
 		time.Sleep(2 * time.Second)
-		
+
 		fmt.Printf("Server %d:  Shutdown complete\n", myServerID)
 		os.Exit(0)
 	}()
@@ -386,6 +396,7 @@ func runServerRole() {
 	// Keep server running
 	select {}
 }
+
 // ------------------ CLIENT ROLE ------------------
 func runClientRole(batchMode string) {
 	log.Infof("Client %d: waiting for cluster to stabilize...", myServerID)

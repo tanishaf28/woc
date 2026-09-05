@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/gob"
+	"fmt"
 	"net"
 	"net/rpc"
 	"os"
@@ -21,15 +22,9 @@ var conns = struct {
 	m: make(map[int]*ServerDock),
 }
 
-// gob requires every concrete type ever assigned to an interface{} field
-// (Reply.ReadResult) to be registered before it crosses the RPC wire,
-// regardless of role/evalType, so this runs unconditionally at startup.
 func init() {
 	gob.Register([][]byte{})
 	gob.Register([]map[string]string{})
-	// handleReadBatch (consensus.go) boxes a multi-key read's N per-key
-	// values into []interface{} for Reply.ReadResult - a distinct concrete
-	// type from either of the above, needing its own registration.
 	gob.Register([]interface{}{})
 }
 
@@ -62,7 +57,7 @@ func startLeaderRPCServer() {
 	}
 
 	log.Infof("Leader RPC server listening on %s", myAddr)
-	rpc.Accept(listener)
+	acceptRPCConns(listener)
 }
 
 func runFollower() {
@@ -93,7 +88,21 @@ func runFollower() {
 	}
 
 	log.Infof("Follower %d: RPC server listening on %s", myServerID, myAddr)
-	rpc.Accept(listener)
+	acceptRPCConns(listener)
+}
+
+func acceptRPCConns(listener net.Listener) {
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			log.Errorf("rpc accept error: %v", err)
+			return
+		}
+		if tcpConn, ok := conn.(*net.TCPConn); ok {
+			_ = tcpConn.SetNoDelay(true)
+		}
+		go rpc.ServeConn(conn)
+	}
 }
 
 // establishRPCs creates RPC connections from this server to all other servers
@@ -124,11 +133,15 @@ func establishRPCs() {
 
 		log.Infof("Connecting to server %d at %v", i, newServer.addr)
 
-		// Retry connection with backoff
 		var txClient *rpc.Client
 		for retry := 0; retry < 10; retry++ {
-			txClient, err = rpc.Dial("tcp", newServer.addr)
+			var netConn net.Conn
+			netConn, err = net.Dial("tcp", newServer.addr)
 			if err == nil {
+				if tcpConn, ok := netConn.(*net.TCPConn); ok {
+					_ = tcpConn.SetNoDelay(true)
+				}
+				txClient = rpc.NewClient(netConn)
 				break
 			}
 			if retry < 9 {
@@ -152,7 +165,7 @@ func establishRPCs() {
 	log.Infof("Successfully established connections to %d servers", len(conns.m))
 }
 
-func initMongoDB() {
+func initMongoDB() error {
 	gob.Register([]mongodb.Query{})
 
 	if mode == Localhost {
@@ -162,45 +175,33 @@ func initMongoDB() {
 	}
 
 	if mongoDbFollower == nil {
-		log.Errorf("mongodb follower initialization failed")
-		return
+		return fmt.Errorf("mongodb follower initialization failed")
 	}
 
-	// Each replica has its own independent, standalone MongoDB instance (see
-	// start_mongodb_hetero.sh / eval_1_indep_ratio.sh / eval_2_batching.sh -
-	// no replica set), so every server, not just server 0, must wait for its
-	// own local instance to be ready and load the initial dataset itself:
-	// there's no MongoDB-level replication to propagate one server's load to
-	// the others. (This used to skip bootstrap on servers != 0, on the
-	// assumption of a shared MongoDB replica set doing that propagation -
-	// that assumption no longer holds now that each instance is independent.)
 	if mode == Distributed {
 		if err := mongoDbFollower.WaitForWritablePrimary(60 * time.Second); err != nil {
-			log.Errorf("mongodb bootstrap waiting for local instance to be ready failed | err: %v", err)
-			return
+			return fmt.Errorf("mongodb bootstrap waiting for local instance to be ready failed: %w", err)
 		}
 	}
 
 	queriesToLoad, err := mongodb.ReadQueryFromFile(mongodb.DataPath + "workload.dat")
 	if err != nil {
-		log.Errorf("getting load data failed | error: %v", err)
-		return
+		return fmt.Errorf("getting load data failed: %w", err)
 	}
 
 	err = mongoDbFollower.ClearTable("usertable")
 	if err != nil {
-		log.Errorf("clean up table failed | err: %v", err)
-		return
+		return fmt.Errorf("clean up table failed: %w", err)
 	}
 
 	log.Debugf("loading data to Mongo DB")
 	_, _, err = mongoDbFollower.FollowerAPI(queriesToLoad)
 	if err != nil {
-		log.Errorf("load data failed | error: %v", err)
-		return
+		return fmt.Errorf("load data failed: %w", err)
 	}
 
 	log.Infof("mongo DB initialization done on server %d", myServerID)
+	return nil
 }
 
 // mongoDBCleanUp cleans up client connections to DB upon ctrl+C

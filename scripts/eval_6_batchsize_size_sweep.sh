@@ -196,7 +196,8 @@ for n in "${ALL_CLUSTER_SIZES[@]}"; do
         BASE_ENV=(
             "NUM_SERVERS=${n}" "NUM_CLIENTS=${CURRENT_CLIENT_COUNT}" "THRESHOLD=${t}"
             "BATCHSIZE=${batchsize}" "INDEP_RATIO=90.0" "NUM_OBJECTS=1000"
-            "PIPELINE_MODE=true" "MAX_INFLIGHT=5"
+            "PIPELINE_MODE=true" "MAX_INFLIGHT=${MAX_INFLIGHT:-5}"
+            "USE_ADAPTIVE_LIMITER=${USE_ADAPTIVE_LIMITER:-false}"
             "LOG_LEVEL=info" "ENABLE_PRIORITY=true"
         )
         run_case "n${n}_batch_${batchsize}" "$RUNTIME_SECONDS"

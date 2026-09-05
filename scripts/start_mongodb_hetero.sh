@@ -46,6 +46,7 @@ MODE="${MODE:-1}"
 INDEP_RATIO="${INDEP_RATIO:-100.0}"
 NUM_OBJECTS="${NUM_OBJECTS:-1000}"
 READ_RATIO="${READ_RATIO:-0.0}"
+READMODE="${READMODE:-fast}"  # 'fast' (default, in-memory FASTREAD shortcut -- see consensus.go's handleRead, never touches real MongoDB) or 'safe' (real quorum-confirmed read)
 BATCH_COMPOSITION="${BATCH_COMPOSITION:-object-specific}"
 LOG_LEVEL="${LOG_LEVEL:-info}"
 ENABLE_PRIORITY="${ENABLE_PRIORITY:-true}"

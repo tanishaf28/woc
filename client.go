@@ -67,19 +67,6 @@ func (sl *SimpleLimiter) AdjustLimit(pathUsed string, latencyMs int64) {
 	// SimpleLimiter is static - no adjustment needed
 }
 
-// NoOpLimiter: For localhost testing - zero overhead
-type NoOpLimiter struct{}
-
-func NewNoOpLimiter(maxInflight int, clientID int) *NoOpLimiter {
-	log.Infof("[Client %d] NoOpLimiter enabled - ZERO overhead (localhost mode)", clientID)
-	return &NoOpLimiter{}
-}
-
-func (nl *NoOpLimiter) Acquire()                                     {}
-func (nl *NoOpLimiter) Release()                                     {}
-func (nl *NoOpLimiter) GetStats() (int, float64)                     { return 999999, 1.0 }
-func (nl *NoOpLimiter) AdjustLimit(pathUsed string, latencyMs int64) {}
-
 // ChannelLimiter: Non-blocking limiter for low latency (Cabinet-style)
 type ChannelLimiter struct {
 	tokens   chan struct{}
@@ -159,14 +146,6 @@ func dialClientRPC(address string, timeout time.Duration) (*rpc.Client, error) {
 	return rpc.NewClient(conn), nil
 }
 
-// isConnectionError distinguishes a transport-level failure (server
-// unreachable/down) from a normal application-level rejection. Go's
-// net/rpc returns a non-nil error from Call in both cases, but a
-// server-side handler returning a non-nil error (e.g. "fast path
-// consensus failed" under contention — a perfectly healthy server) comes
-// back wrapped as rpc.ServerError; anything else (broken pipe, connection
-// reset, rpc.ErrShutdown, timeout) means the connection itself is bad.
-// Only the latter should evict a server from the client's rotation.
 func isConnectionError(err error) bool {
 	if err == nil {
 		return false
@@ -183,88 +162,99 @@ func isConnectionError(err error) bool {
 // Without this, a client that connected to a server which later dies mid-run
 // keeps routing requests into it forever with no fallback to a live one.
 type ServerPool struct {
-	mu       sync.RWMutex
-	conns    map[int]*rpc.Client // every server this client ever connected to
-	healthy  []int
+	conns map[int]*rpc.Client 
+	healthy  atomic.Pointer[[]int]
 	idx      atomic.Uint64
 	clientID int
 }
 
 func NewServerPool(conns map[int]*rpc.Client, clientID int) *ServerPool {
 	p := &ServerPool{conns: conns, clientID: clientID}
+	h := make([]int, 0, len(conns))
 	for sid := range conns {
-		p.healthy = append(p.healthy, sid)
+		h = append(h, sid)
 	}
-	sort.Ints(p.healthy)
+	sort.Ints(h)
+	p.healthy.Store(&h)
 	return p
 }
 
-// Conn returns the (possibly stale) connection for a specific server,
-// regardless of whether it's currently marked healthy.
+
 func (p *ServerPool) Conn(sid int) (*rpc.Client, bool) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
 	c, ok := p.conns[sid]
 	return c, ok
 }
 
-// Pick round-robins among currently-healthy servers — used only as the
-// failover target when a pinned server is down, never as a top-level
-// dispatch mode.
+
 func (p *ServerPool) Pick() (int, *rpc.Client, bool) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	if len(p.healthy) == 0 {
+	h := *p.healthy.Load()
+	if len(h) == 0 {
 		return 0, nil, false
 	}
 	i := p.idx.Add(1)
-	sid := p.healthy[i%uint64(len(p.healthy))]
+	sid := h[i%uint64(len(h))]
 	return sid, p.conns[sid], true
 }
 
-// PickPinned returns the connection to serverID if it is currently healthy,
-// falling back to round-robin if that server is unreachable.
+
 func (p *ServerPool) PickPinned(serverID int) (int, *rpc.Client, bool) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	for _, id := range p.healthy {
+	h := *p.healthy.Load()
+	for _, id := range h {
 		if id == serverID {
 			return serverID, p.conns[serverID], true
 		}
 	}
-	// Pinned server not healthy — fall back to round-robin
-	if len(p.healthy) == 0 {
+
+	if len(h) == 0 {
 		return 0, nil, false
 	}
 	i := p.idx.Add(1)
-	sid := p.healthy[i%uint64(len(p.healthy))]
+	sid := h[i%uint64(len(h))]
 	return sid, p.conns[sid], true
 }
 
 func (p *ServerPool) MarkDown(sid int) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for i, id := range p.healthy {
-		if id == sid {
-			p.healthy = append(p.healthy[:i:i], p.healthy[i+1:]...)
+	for {
+		old := p.healthy.Load()
+		idx := -1
+		for i, id := range *old {
+			if id == sid {
+				idx = i
+				break
+			}
+		}
+		if idx == -1 {
+			return
+		}
+		next := make([]int, 0, len(*old)-1)
+		next = append(next, (*old)[:idx]...)
+		next = append(next, (*old)[idx+1:]...)
+		if p.healthy.CompareAndSwap(old, &next) {
 			log.Warnf("[Client %d] Server %d unreachable, removed from rotation (%d healthy remain)",
-				p.clientID, sid, len(p.healthy))
+				p.clientID, sid, len(next))
 			return
 		}
 	}
 }
 
 func (p *ServerPool) MarkUp(sid int) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for _, id := range p.healthy {
-		if id == sid {
+	if _, ok := p.conns[sid]; !ok {
+		return
+	}
+	for {
+		old := p.healthy.Load()
+		for _, id := range *old {
+			if id == sid {
+				return
+			}
+		}
+		next := make([]int, len(*old), len(*old)+1)
+		copy(next, *old)
+		next = append(next, sid)
+		if p.healthy.CompareAndSwap(old, &next) {
+			log.Infof("[Client %d] Server %d reachable again, re-added to rotation", p.clientID, sid)
 			return
 		}
-	}
-	if _, ok := p.conns[sid]; ok {
-		p.healthy = append(p.healthy, sid)
-		log.Infof("[Client %d] Server %d reachable again, re-added to rotation", p.clientID, sid)
 	}
 }
 
@@ -276,21 +266,17 @@ func (p *ServerPool) startReviver(interval time.Duration) {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for range ticker.C {
-			p.mu.RLock()
+			h := *p.healthy.Load()
+			healthySet := make(map[int]bool, len(h))
+			for _, sid := range h {
+				healthySet[sid] = true
+			}
 			down := make([]int, 0)
 			for sid := range p.conns {
-				found := false
-				for _, h := range p.healthy {
-					if h == sid {
-						found = true
-						break
-					}
-				}
-				if !found {
+				if !healthySet[sid] {
 					down = append(down, sid)
 				}
 			}
-			p.mu.RUnlock()
 
 			for _, sid := range down {
 				conn := p.conns[sid]
@@ -303,11 +289,6 @@ func (p *ServerPool) startReviver(interval time.Duration) {
 	}()
 }
 
-// callWithFailover issues the RPC against startSID, and on a
-// connection-level failure (isConnectionError), evicts that server and
-// retries on another currently-healthy one — bounded to one attempt per
-// known server so a fully-dead cluster still returns instead of looping
-// forever. Returns the server actually used, for logging/metrics.
 func callWithFailover(pool *ServerPool, startSID int, cmd *Args, reply *Reply) (usedSID int, err error) {
 	sid := startSID
 	conn, ok := pool.Conn(sid)
@@ -346,16 +327,6 @@ type AdaptiveLimiter struct {
 	currentActive  int
 	lastAdjustTime time.Time
 	clientID       int
-	// baselineLatencyMs is a slow-moving EMA of this client's own observed
-	// round latency, used to scale AdjustLimit's backoff/growth thresholds
-	// to what's normal for THIS run instead of a hardcoded constant. A flat
-	// constant can't distinguish "the protocol is struggling" from "this
-	// run has injected network delay baked into every round's latency,
-	// healthy or not" - under a netem delay eval, a fixed 300ms trigger
-	// collapses concurrency down to minInflight on nearly every adjustment
-	// simply because injected delay alone pushes normal round latency past
-	// 300ms, independent of how well the consensus protocol is actually
-	// coping with it.
 	baselineLatencyMs float64
 }
 
@@ -434,14 +405,6 @@ func (al *AdaptiveLimiter) AdjustLimit(pathUsed string, latencyMs int64) {
 		al.fastPathRatio = 0.85*al.fastPathRatio + 0.15*0.0
 	}
 
-	// Track this run's own typical round latency, slowly (EMA), so the
-	// grow/backoff thresholds below can react to "worse than typical for
-	// this run" instead of a fixed constant that can't tell a genuinely
-	// struggling protocol apart from a run where every round simply costs
-	// more because of injected network delay. Seeded from the first sample
-	// rather than 0 so an early burst of delayed rounds doesn't get
-	// compared against an artificially low baseline before it's had a
-	// chance to adapt.
 	if al.baselineLatencyMs <= 0 {
 		al.baselineLatencyMs = float64(latencyMs)
 	} else {
@@ -454,12 +417,6 @@ func (al *AdaptiveLimiter) AdjustLimit(pathUsed string, latencyMs int64) {
 	al.lastAdjustTime = time.Now()
 
 	oldLimit := al.currentLimit
-
-	// relThreshold scales an absolute floor by the run's own baseline
-	// latency: in a low/no-delay run baseline*mult stays below floor, so
-	// this returns floor unchanged (existing tuning for normal runs is
-	// untouched); in a sustained-high-delay run it relaxes past floor so
-	// delay alone doesn't get misread as protocol distress.
 	relThreshold := func(floorMs float64, mult float64) float64 {
 		scaled := al.baselineLatencyMs * mult
 		if scaled > floorMs {
@@ -576,26 +533,21 @@ func recordBatchMetrics(reply *Reply, clockVal int, batchSize int) {
 	}
 }
 
-// RecordBatchTS feeds the tps_timeline_*.csv time-series recorder.
-//   rttMs           — client-measured round-trip latency (issue-to-completion,
-//                      includes network both ways); the primary metric.
-//   serverLatencyMs — reply.Latency, the server's own processing-time-only
-//                      measurement; recorded alongside for comparison.
-func RecordBatchTS(rttMs float64, serverLatencyMs float64, isErr bool) {
+func RecordBatchTS(nOps int, rttMs float64, serverLatencyMs float64, isErr bool) {
 	if isErr {
 		return
 	}
-	tsOpsTotal.Add(1)
+	tsOpsTotal.Add(int64(nOps))
 	tsLatSumMs.Add(int64(rttMs * 100))
 	tsLatCount.Add(1)
 	tsServerLatSumMs.Add(int64(serverLatencyMs * 100))
 }
 
-func startTimeSeriesRecorder(clientID int, intervalMs int) {
+func startTimeSeriesRecorder(clientID int, intervalMs int) func() {
 	dirPath := fmt.Sprintf("./eval/client%d", clientID)
 	if err := os.MkdirAll(dirPath, 0o755); err != nil {
 		log.Errorf("[TS] Client %d: failed to create eval dir: %v", clientID, err)
-		return
+		return func() {}
 	}
 
 	ts := time.Now().Format("20060102_150405")
@@ -603,43 +555,53 @@ func startTimeSeriesRecorder(clientID int, intervalMs int) {
 	f, err := os.Create(filePath)
 	if err != nil {
 		log.Errorf("[TS] Client %d: failed to create timeline file: %v", clientID, err)
-		return
+		return func() {}
 	}
 
 	if _, err := fmt.Fprintln(f, "elapsed_ms,tps,lat_avg_ms,server_lat_avg_ms,event"); err != nil {
 		_ = f.Close()
 		log.Errorf("[TS] Client %d: failed to write header: %v", clientID, err)
-		return
+		return func() {}
 	}
 
 	startTime := time.Now()
 	ticker := time.NewTicker(time.Duration(intervalMs) * time.Millisecond)
+	stopCh := make(chan struct{})
+	doneCh := make(chan struct{})
 
 	go func() {
+		defer close(doneCh)
 		defer f.Close()
 		defer ticker.Stop()
 
-		var prevOps int64
-		for range ticker.C {
-			elapsed := time.Since(startTime).Milliseconds()
+		var prevOps, prevLat, prevServerLat, prevCnt int64
+		lastTick := startTime
+
+		writeSample := func(now time.Time) {
+			elapsed := now.Sub(startTime).Milliseconds()
 			curOps := tsOpsTotal.Load()
 			curLat := tsLatSumMs.Load()
 			curServerLat := tsServerLatSumMs.Load()
 			curCnt := tsLatCount.Load()
 
 			dOps := curOps - prevOps
-			prevOps = curOps
+			dLat := curLat - prevLat
+			dServerLat := curServerLat - prevServerLat
+			dCnt := curCnt - prevCnt
+			prevOps, prevLat, prevServerLat, prevCnt = curOps, curLat, curServerLat, curCnt
 
-			tps := 0.0
-			if intervalMs > 0 {
-				tps = float64(dOps) * 1000.0 / float64(intervalMs)
+			deltaSecs := now.Sub(lastTick).Seconds()
+			lastTick = now
+			if deltaSecs <= 0 {
+				deltaSecs = float64(intervalMs) / 1000.0
 			}
+			tps := float64(dOps) / deltaSecs
 
 			latAvg := 0.0
 			serverLatAvg := 0.0
-			if curCnt > 0 {
-				latAvg = float64(curLat) / float64(curCnt) / 100.0
-				serverLatAvg = float64(curServerLat) / float64(curCnt) / 100.0
+			if dCnt > 0 {
+				latAvg = float64(dLat) / float64(dCnt) / 100.0
+				serverLatAvg = float64(dServerLat) / float64(dCnt) / 100.0
 			}
 
 			eventFile := fmt.Sprintf("./eval/client%d/.event", clientID)
@@ -653,9 +615,24 @@ func startTimeSeriesRecorder(clientID int, intervalMs int) {
 				log.Warnf("[TS] Client %d: failed to write timeline row: %v", clientID, err)
 			}
 		}
+
+		for {
+			select {
+			case now := <-ticker.C:
+				writeSample(now)
+			case <-stopCh:
+				writeSample(time.Now())
+				return
+			}
+		}
 	}()
 
 	log.Infof("[Client %d] Time-series recorder started -> %s (interval=%dms)", clientID, filePath, intervalMs)
+
+	return func() {
+		close(stopCh)
+		<-doneCh
+	}
 }
 
 func RunClient(clientID int, configPath string, numOps int, indepRatio float64, batchMode string) {
@@ -704,12 +681,8 @@ func RunClient(clientID int, configPath string, numOps int, indepRatio float64, 
 	if pipelined {
 		useAdaptive := os.Getenv("USE_ADAPTIVE_LIMITER") == "true"
 		useSimple := os.Getenv("USE_SIMPLE_LIMITER") == "true"
-		noLimiter := os.Getenv("NO_LIMITER") == "true" // Localhost bypass
 
-		if noLimiter {
-			limiter = NewNoOpLimiter(maxInflight, clientID)
-			log.Infof("Client %d: PIPELINED mode with NO LIMITER (localhost only - zero overhead)", clientID)
-		} else if useSimple {
+		if useSimple {
 			limiter = NewSimpleLimiter(maxInflight, clientID)
 			log.Infof("Client %d: PIPELINED mode with SimpleLimiter (lock-free, max %d concurrent batches)",
 				clientID, maxInflight)
@@ -768,6 +741,14 @@ func RunClient(clientID int, configPath string, numOps int, indepRatio float64, 
 	sigChan := make(chan os.Signal, 10)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
+	var tsStopMu sync.Mutex
+	tsStop := func() {}
+	setTSStop := func(fn func()) {
+		tsStopMu.Lock()
+		tsStop = fn
+		tsStopMu.Unlock()
+	}
+
 	// Dedicated goroutine for signal handling
 	go func() {
 		sig := <-sigChan
@@ -800,6 +781,13 @@ func RunClient(clientID int, configPath string, numOps int, indepRatio float64, 
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
+
+		// Flush the last (possibly partial) time-series interval before exit,
+		// so tps_timeline_*.csv doesn't silently drop it.
+		tsStopMu.Lock()
+		stopFn := tsStop
+		tsStopMu.Unlock()
+		stopFn()
 
 		// Save metrics
 		log.Infof("Client %d:  Saving metrics...", clientID)
@@ -849,7 +837,7 @@ func RunClient(clientID int, configPath string, numOps int, indepRatio float64, 
 				tsInterval = 500
 			}
 		}
-		go startTimeSeriesRecorder(clientID, tsInterval)
+		setTSStop(startTimeSeriesRecorder(clientID, tsInterval))
 	} else {
 		log.Infof("[Client %d] Time-series recorder disabled (ENABLE_TIMESERIES=false)", clientID)
 	}
@@ -857,10 +845,6 @@ func RunClient(clientID int, configPath string, numOps int, indepRatio float64, 
 	rand.Seed(time.Now().UnixNano() + int64(clientID))
 	pool := NewServerPool(conns, clientID)
 	pool.startReviver(5 * time.Second)
-
-	// Objects are pre-warmed cluster-wide by the servers (see
-	// preWarmAllObjects / InitObjectRegistry) - no client-side pre-creation
-	// RPC is needed for any object type.
 
 	opsLabel := fmt.Sprintf("%d", numOps)
 	if numOps <= 0 {
@@ -894,32 +878,7 @@ func RunClient(clientID int, configPath string, numOps int, indepRatio float64, 
 
 	// Job queue for sequential mode
 	jobQ := make(map[int]chan struct{})
-
-	// sendCommand picks a target server and dispatches cmd (pipelined or
-	// sequential, per the client's mode), recording metrics exactly as the
-	// single inline call site used to. Extracted into its own function so a
-	// single loop iteration can send more than one command - needed for
-	// MongoDB batches that split into a same-type independent request and a
-	// same-type dependent request (see the MongoDB batch-composition branch
-	// below). Returns false if no healthy server was available (caller
-	// should retry without advancing op, matching the original behavior).
 	sendCommand := func(cmd *Args, currentBatch int) bool {
-		// SELECT TARGET SERVER
-		// Server will decide: fast path (coordinate) or slow path (forward to
-		// owner) regardless of which replica this lands on - but for an
-		// independent-object request, we already know (deterministically,
-		// via the same hash ring servers use - see ObjectOwner in
-		// objectmap.go) which replica actually owns fast-path coordination
-		// for cmd.ObjID, so prefer sending straight there instead of always
-		// paying a guaranteed extra forward hop through the fixed
-		// -pinserver for the ~(N-1)/N fraction of requests it doesn't
-		// happen to own. Falls back to the pinned server (via PickPinned's
-		// own unhealthy-target fallback) if the owner is currently down.
-		// Dependent-object and multi-object requests keep routing to the
-		// pinned server - there's no single "owner" to aim for (they always
-		// need the global leader, or span several objects with different
-		// owners), and the server-side forward-to-leader path already
-		// handles that case.
 		preferredServer := pinServer
 		if cmd.ObjType == IndependentObject && cmd.ObjID != "" {
 			preferredServer = ObjectOwner(cmd.ObjID)
@@ -975,11 +934,11 @@ func RunClient(clientID int, configPath string, numOps int, indepRatio float64, 
 						log.Debugf("[CLIENT-LATENCY] Batch %d | ERROR: %v", clockVal, err)
 					}
 					RecordBatch(batchSize, 0, "ERROR", true)
-					RecordBatchTS(0, 0, true)
+					RecordBatchTS(batchSize, 0, 0, true)
 				} else {
 					recordBatchMetrics(reply, clockVal, batchSize)
 					RecordBatch(batchSize, reply.Latency, reply.PathUsed, false)
-					RecordBatchTS(rpcLatencyMs, reply.Latency, false)
+					RecordBatchTS(batchSize, rpcLatencyMs, reply.Latency, false)
 
 					// Adaptive limiter adjustment (based on RPC result)
 					if reply.Latency > 0 {
@@ -1044,11 +1003,11 @@ func RunClient(clientID int, configPath string, numOps int, indepRatio float64, 
 					perfM.IncConflict(cmd.ClientClock)
 				}
 				RecordBatch(currentBatch, 0, "ERROR", true)
-				RecordBatchTS(0, 0, true)
+				RecordBatchTS(currentBatch, 0, 0, true)
 			} else {
 				recordBatchMetrics(reply, cmd.ClientClock, currentBatch)
 				RecordBatch(currentBatch, reply.Latency, reply.PathUsed, false)
-				RecordBatchTS(float64(rpcLatency.Microseconds())/1000.0, reply.Latency, false)
+				RecordBatchTS(currentBatch, float64(rpcLatency.Microseconds())/1000.0, reply.Latency, false)
 			}
 			metricsLatency := time.Since(metricsStart)
 
@@ -1107,11 +1066,6 @@ func RunClient(clientID int, configPath string, numOps int, indepRatio float64, 
 
 		// Batch composition logic
 		if targetObjID != "" {
-			// Pin every operation to one exact object, for measuring that
-			// object's own throughput/latency (see -hotobjthreshold eval) -
-			// every element of the batch targets the same object, same
-			// shape as "single_obj" but a fixed ID instead of a fresh
-			// random pick per batch.
 			meta, ok := objectByID[targetObjID]
 			if !ok {
 				log.Fatalf("Client %d: -targetobjid=%s not found in the object registry", clientID, targetObjID)
@@ -1120,18 +1074,6 @@ func RunClient(clientID int, configPath string, numOps int, indepRatio float64, 
 			cmd.ObjType = meta.Type
 			cmd.ObjID = meta.ID
 		} else if evalType == MongoDB {
-			// MongoDB routing keys off the real YCSB record being touched,
-			// not the synthetic obj-N pool: the consensus layer's
-			// per-object lock/ownership has to apply to the document
-			// actually written, or the fast/slow-path ordering guarantee
-			// says nothing about what ends up in MongoDB. classifyRealKey
-			// types each key deterministically off -indep (same mechanism
-			// as the synthetic pool, so the I2D sweep still works here);
-			// keyOwnerClientIdx is a separate concern, used only to pick
-			// which client's traffic treats an independent-typed key as
-			// "mine" (approximating real single-writer access), so this
-			// client doesn't manufacture artificial contention on keys
-			// nominally independent but actually driven by another client.
 			keys := make([]string, currentBatch)
 			types := make([]int, currentBatch)
 			queries := make([]mongodb.Query, currentBatch)
@@ -1161,27 +1103,12 @@ func RunClient(clientID int, configPath string, numOps int, indepRatio float64, 
 			}
 
 			if isRead {
-				// Reads bypass conJobMongoDB's write classification entirely
-				// (handled via handleRead instead), so there's no slow-path-
-				// forcing behavior to split around here - keep the existing
-				// single-command shape and fall through to sendCommand below.
 				cmd.IsMixed = true
 				cmd.ObjIDs = keys
 				cmd.ObjTypes = types
 				cmd.ObjID = keys[0]
 				cmd.ObjType = types[0]
 			} else {
-				// Split into same-type batches so each actually gets routed
-				// via its own fast/slow path. Before this split, one
-				// dependent-typed key anywhere in the batch forced the
-				// *entire* batch onto the slow path (conJobMongoDB's
-				// needsSlowPath), while the client-reported
-				// "MIXED(FAST:x,SLOW:y)" label kept describing the batch's
-				// key-type composition, not which path actually ran -
-				// making it look like partial fast-path execution was
-				// happening when in practice almost none was, for any
-				// batch spanning more than one key at a typical -indep
-				// ratio.
 				var indepKeys, depKeys []string
 				var indepQueries, depQueries []mongodb.Query
 				for b := 0; b < currentBatch; b++ {
@@ -1253,12 +1180,6 @@ func RunClient(clientID int, configPath string, numOps int, indepRatio float64, 
 				cmd.ObjIDs[b] = meta.ID
 			}
 		} else if batchComposition == "multi_obj" {
-			// One atomic transaction touching N distinct objects together -
-			// always dependent/slow-path regardless of the individual
-			// objects' types (paper classification: spanning >1 object
-			// forces dependent). currentBatch is overridden to N so the
-			// shared CmdPlain-building code below produces exactly one
-			// payload element per object.
 			const multiObjN = 2
 			const maxPickAttempts = 50 // bounded: PickObjectOfType(type) returns nil if that type's pool is empty (e.g. -indep=100 or 0)
 			cmd.MultiObject = true
